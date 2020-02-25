@@ -2,7 +2,7 @@ package distro
 
 import (
 	. "github.com/sipsma/bincastle/graph"
-	"github.com/sipsma/bincastle/src"
+	"github.com/sipsma/bincastle/distro/src"
 )
 
 type distroSources struct {
