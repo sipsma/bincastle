@@ -1,4 +1,4 @@
-package ctr
+package cmdgen
 
 import (
 	"context"
@@ -29,9 +29,13 @@ import (
 	ociImage "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/sipsma/bincastle/buildkit"
+	"github.com/sipsma/bincastle/ctr"
 	"github.com/sipsma/bincastle/graph"
 	"github.com/urfave/cli"
 	"golang.org/x/sys/unix"
+
+	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 )
 
 const (
@@ -41,7 +45,6 @@ const (
 	attachArg = "attach"
 
 	// internal
-	runcInitArg           = "runcinit"
 	internalPrepareRunArg = "internalPrepareRun"
 	internalRunArg        = "internalRun"
 	internalExportArg     = "internalExport"
@@ -56,7 +59,7 @@ var (
 )
 
 func CmdInit() {
-	if len(os.Args) > 1 && os.Args[1] == runcInitArg {
+	if len(os.Args) > 1 && os.Args[1] == ctr.RuncInitArg {
 		runtime.GOMAXPROCS(1)
 		runtime.LockOSThread()
 		factory, _ := libcontainer.New("")
@@ -87,7 +90,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 						os.MkdirAll(workDir, 0700),
 						os.MkdirAll(stateDir, 0700),
 						os.MkdirAll(varDir, 0700),
-						ctrize(ctrName, stateDir, ContainerDef{
+						ctrize(ctrName, stateDir, ctr.ContainerDef{
 							Args: []string{"/self",
 								internalPrepareRunArg, ctrName,
 							},
@@ -98,27 +101,27 @@ func CmdMain(graphs map[string]graph.Graph) {
 							Terminal:     false,
 							Uid:          0,
 							Gid:          0,
-							Capabilities: &AllCaps,
-							Mounts: map[string]MountPoint{
-								"/": MountPoint{
+							Capabilities: &ctr.AllCaps,
+							Mounts: map[string]ctr.MountPoint{
+								"/": ctr.MountPoint{
 									WorkDir: workDir,
 								},
-								"/run/ssh-agent.sock": MountPoint{
+								"/run/ssh-agent.sock": ctr.MountPoint{
 									Lowers: []specs.Mount{{
-										Source:      sshAgentSock,
-										Options:     []string{"bind"},
+										Source:  sshAgentSock,
+										Options: []string{"bind"},
 									}},
 								},
-								"/var": MountPoint{
+								"/var": ctr.MountPoint{
 									Lowers: []specs.Mount{{
-										Source:      varDir,
-										Options:     []string{"bind"},
+										Source:  varDir,
+										Options: []string{"bind"},
 									}},
 								},
-								"/self": MountPoint{
+								"/self": ctr.MountPoint{
 									Lowers: []specs.Mount{{
-										Source:      selfBin,
-										Options:     []string{"bind", "ro"},
+										Source:  selfBin,
+										Options: []string{"bind", "ro"},
 									}},
 								},
 							},
@@ -161,7 +164,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 					}
 
 					env := []string{
-						"PATH="+strings.Join([]string{
+						"PATH=" + strings.Join([]string{
 							"/bin",
 							"/sbin",
 							"/usr/bin",
@@ -180,48 +183,48 @@ func CmdMain(graphs map[string]graph.Graph) {
 					// srcPkgs := make(map[string]bool)
 					for _, pkg := range graph.Tsort(g) {
 						lowerdirs = append(lowerdirs, specs.Mount{
-							Source: filepath.Join("/var/ctrs", ctrName, "lowers", graph.NameOf(pkg)+"-"+pkg.ID()),
+							Source:  filepath.Join("/var/ctrs", ctrName, "lowers", graph.NameOf(pkg)+"-"+pkg.ID()),
 							Options: []string{"bind"},
 						})
 					}
 
-					return ctrize(ctrName, "/var/state", ContainerDef{
+					return ctrize(ctrName, "/var/state", ctr.ContainerDef{
 						Args:         []string{"/bin/bash"},
 						Env:          env,
 						WorkingDir:   "/home/sipsma",
 						Terminal:     true,
 						Uid:          0,
 						Gid:          0,
-						Capabilities: &AllCaps,
+						Capabilities: &ctr.AllCaps,
 
-						Mounts: map[string]MountPoint{
-							"/": MountPoint{
+						Mounts: map[string]ctr.MountPoint{
+							"/": ctr.MountPoint{
 								UpperDir: filepath.Join("/var/ctrs", ctrName, "upper"),
-								WorkDir: filepath.Join("/var/ctrs", ctrName, "work"),
-								Lowers: lowerdirs,
+								WorkDir:  filepath.Join("/var/ctrs", ctrName, "work"),
+								Lowers:   lowerdirs,
 							},
-							"/run": MountPoint{
+							"/run": ctr.MountPoint{
 								Lowers: []specs.Mount{{
-									Source:      "/run",
-									Options:     []string{"rbind"},
+									Source:  "/run",
+									Options: []string{"rbind"},
 								}},
 							},
-							"/self": MountPoint{
+							"/self": ctr.MountPoint{
 								Lowers: []specs.Mount{{
-									Source:      selfBin,
-									Options:     []string{"bind", "ro"},
+									Source:  selfBin,
+									Options: []string{"bind", "ro"},
 								}},
 							},
-							"/home/sipsma/.bincastle": MountPoint{
+							"/home/sipsma/.bincastle": ctr.MountPoint{
 								Lowers: []specs.Mount{{
-									Source:      filepath.Join("/var/ctrs", ctrName, "inner"),
-									Options:     []string{"rbind"},
+									Source:  filepath.Join("/var/ctrs", ctrName, "inner"),
+									Options: []string{"rbind"},
 								}},
 							},
-							"/var/ctrs": MountPoint{
+							"/var/ctrs": ctr.MountPoint{
 								Lowers: []specs.Mount{{
-									Source:      filepath.Join("/var/ctrs", ctrName),
-									Options:     []string{"rbind"},
+									Source:  filepath.Join("/var/ctrs", ctrName),
+									Options: []string{"rbind"},
 								}},
 							},
 						},
@@ -242,7 +245,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 						os.MkdirAll(workDir, 0700),
 						os.MkdirAll(stateDir, 0700),
 						os.MkdirAll(varDir, 0700),
-						ctrize(ctrName, stateDir, ContainerDef{
+						ctrize(ctrName, stateDir, ctr.ContainerDef{
 							Args: []string{
 								"/proc/self/exe", internalExportArg, ctrName, exportRef},
 							Env: []string{
@@ -252,27 +255,27 @@ func CmdMain(graphs map[string]graph.Graph) {
 							Terminal:     false,
 							Uid:          0,
 							Gid:          0,
-							Capabilities: &AllCaps,
-							Mounts: map[string]MountPoint{
-								"/": MountPoint{
+							Capabilities: &ctr.AllCaps,
+							Mounts: map[string]ctr.MountPoint{
+								"/": ctr.MountPoint{
 									WorkDir: workDir,
 								},
-								"/run/ssh-agent.sock": MountPoint{
+								"/run/ssh-agent.sock": ctr.MountPoint{
 									Lowers: []specs.Mount{{
-										Source:      sshAgentSock,
-										Options:     []string{"bind"},
+										Source:  sshAgentSock,
+										Options: []string{"bind"},
 									}},
 								},
-								"/var": MountPoint{
+								"/var": ctr.MountPoint{
 									Lowers: []specs.Mount{{
-										Source:      varDir,
-										Options:     []string{"bind"},
+										Source:  varDir,
+										Options: []string{"bind"},
 									}},
 								},
-								"/self": MountPoint{
+								"/self": ctr.MountPoint{
 									Lowers: []specs.Mount{{
-										Source:      selfBin,
-										Options:     []string{"bind", "ro"},
+										Source:  selfBin,
+										Options: []string{"bind", "ro"},
 									}},
 								},
 							},
@@ -311,7 +314,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 					ctrName := attachTarget + "-attach"
 
 					return multierror.Append(
-						ctrize(ctrName, stateDir, ContainerDef{
+						ctrize(ctrName, stateDir, ctr.ContainerDef{
 							Args: []string{
 								"/proc/self/exe", internalAttachArg, attachTarget,
 							},
@@ -322,27 +325,27 @@ func CmdMain(graphs map[string]graph.Graph) {
 							Terminal:     false,
 							Uid:          0,
 							Gid:          0,
-							Capabilities: &AllCaps,
-							Mounts: map[string]MountPoint{
-								"/": MountPoint{
+							Capabilities: &ctr.AllCaps,
+							Mounts: map[string]ctr.MountPoint{
+								"/": ctr.MountPoint{
 									WorkDir: workDir,
 								},
-								"/run/ssh-agent.sock": MountPoint{
+								"/run/ssh-agent.sock": ctr.MountPoint{
 									Lowers: []specs.Mount{{
-										Source:      sshAgentSock,
-										Options:     []string{"bind"},
+										Source:  sshAgentSock,
+										Options: []string{"bind"},
 									}},
 								},
-								"/var": MountPoint{
+								"/var": ctr.MountPoint{
 									Lowers: []specs.Mount{{
-										Source:      varDir,
-										Options:     []string{"bind"},
+										Source:  varDir,
+										Options: []string{"bind"},
 									}},
 								},
-								"/self": MountPoint{
+								"/self": ctr.MountPoint{
 									Lowers: []specs.Mount{{
-										Source:      selfBin,
-										Options:     []string{"bind", "ro"},
+										Source:  selfBin,
+										Options: []string{"bind", "ro"},
 									}},
 								},
 							},
@@ -385,7 +388,7 @@ func withInheritableEnv(finalEnv []string) []string {
 	return finalEnv
 }
 
-func ctrize(id string, stateDir string, ctrDef ContainerDef) error {
+func ctrize(id string, stateDir string, ctrDef ctr.ContainerDef) error {
 	waitCh, cleanup, err := ctrDef.Run(id, stateDir)
 	if err != nil {
 		return err
@@ -398,7 +401,7 @@ func ctrize(id string, stateDir string, ctrDef ContainerDef) error {
 
 // TODO verify the container and fifos actually exist before trying attach
 func attach(id string, stateDir string) error {
-	ioWait, cleanup, err := Attach(
+	ioWait, cleanup, err := ctr.Attach(
 		id, stateDir, os.Stdin, os.Stdout)
 	if err != nil {
 		return err
@@ -412,7 +415,7 @@ func attach(id string, stateDir string) error {
 func buildGraph(
 	g graph.Graph,
 	unpack bool,
-) (context.Context, context.CancelFunc, *ImageBackend, error) {
+) (context.Context, context.CancelFunc, *buildkit.ImageBackend, error) {
 	// TODO debug mode
 	go func() {
 		log.Println(http.ListenAndServe("localhost:6060", nil))
@@ -421,7 +424,7 @@ func buildGraph(
 	ctx, cancel := context.WithCancel(
 		namespaces.WithNamespace(context.Background(), "buildkit"))
 
-	buildkitErrCh, imageBackend := buildkitd(ctx)
+	buildkitErrCh, imageBackend := buildkit.Buildkitd(ctx)
 	select {
 	case err := <-buildkitErrCh:
 		return nil, nil, nil, err
@@ -436,7 +439,7 @@ func buildGraph(
 		return nil, nil, nil, err
 	}
 
-	err = build(ctx, depOnlyPkg.ID(), llbdef, nil, unpack)
+	err = buildkit.Build(ctx, depOnlyPkg.ID(), llbdef, nil, unpack)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -447,7 +450,7 @@ func buildGraph(
 			return err
 		}
 
-		err = build(ctx, pkg.ID(), llbdef, nil, unpack)
+		err = buildkit.Build(ctx, pkg.ID(), llbdef, nil, unpack)
 		if err != nil {
 			return err
 		}
@@ -469,47 +472,71 @@ func prepareRun(g graph.Graph, root string) error {
 
 	// TODO better dirs
 	err = os.MkdirAll(filepath.Join(root, "lowers"), 0700)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 
 	err = os.MkdirAll(filepath.Join(root, "upper"), 0700)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 
 	err = os.MkdirAll(filepath.Join(root, "work"), 0700)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 
 	err = os.MkdirAll(filepath.Join(root, "state"), 0700)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 
 	err = os.MkdirAll(filepath.Join(root, "merged"), 0700)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 
 	err = os.MkdirAll(filepath.Join(root, "inner"), 0700)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 
 	// TODO use llbbuild to simplify a bit?
 	// TODO parallelize
 	for _, pkg := range graph.Tsort(g) {
 		image, err := imageBackend.ImageStore.Get(ctx, pkg.ID())
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 
 		ids, err := image.RootFS(ctx, imageBackend.ContentStore, nil)
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 
 		parentRef := identity.ChainID(ids).String()
 		mntable, err := imageBackend.Snapshotter.View(ctx,
 			pkg.ID()+"-view-"+bkIdentity.NewID(), parentRef)
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 
 		diffMnts, cleanupMnt, err := mntable.Mount()
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 		defer cleanupMnt()
 
 		lowerdir := filepath.Join(root, "lowers", graph.NameOf(pkg)+"-"+pkg.ID())
 		err = os.MkdirAll(lowerdir, 0700)
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 
 		err = mount.All(diffMnts, lowerdir)
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 	}
 
 	return nil
@@ -532,15 +559,21 @@ func export(g graph.Graph, exportRef string) error {
 	var diffIDs []digest.Digest
 	for _, pkg := range graph.Tsort(g) {
 		image, err := imageBackend.ImageStore.Get(ctx, pkg.ID())
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 
 		manifest, err := images.Manifest(ctx, imageBackend.ContentStore, image.Target, nil)
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 		// TODO there's only one layer, right?
 		ociLayers = append([]ociImage.Descriptor{manifest.Layers[0]}, ociLayers...)
 
 		ids, err := image.RootFS(ctx, imageBackend.ContentStore, nil)
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 		// TODO there's only one layer, right?
 		diffIDs = append(
 			append([]digest.Digest{}, ids...), diffIDs...)
@@ -556,10 +589,14 @@ func export(g graph.Graph, exportRef string) error {
 	for _, ociLayer := range ociLayers {
 		layerRef := fmt.Sprintf("%s@%s", namedExportRef.Name(), ociLayer.Digest.String())
 		pusher, err := remoteCtx.Resolver.Pusher(ctx, layerRef)
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 		err = remotes.PushContent(ctx, pusher,
 			ociLayer, imageBackend.ContentStore, remoteCtx.PlatformMatcher, nil)
-		nilordie(err)
+		if err != nil {
+			panic("TODO")
+		}
 	}
 
 	imageConfig := ociImage.Image{
@@ -579,7 +616,9 @@ func export(g graph.Graph, exportRef string) error {
 		},
 	}
 	imageConfigBytes, err := json.Marshal(&imageConfig)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 	imageConfigDescriptor := ociImage.Descriptor{
 		MediaType: "application/vnd.docker.container.image.v1+json",
 		Size:      int64(len(imageConfigBytes)),
@@ -590,11 +629,17 @@ func export(g graph.Graph, exportRef string) error {
 		content.WithRef(remotes.MakeRefKey(ctx, imageConfigDescriptor)),
 		content.WithDescriptor(imageConfigDescriptor),
 	)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 	_, err = contentWriter.Write(imageConfigBytes)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 	err = contentWriter.Commit(ctx, imageConfigDescriptor.Size, imageConfigDescriptor.Digest)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 
 	imageManifest := struct {
 		ociImage.Manifest
@@ -616,7 +661,9 @@ func export(g graph.Graph, exportRef string) error {
 	}
 
 	imageManifestBytes, err := json.Marshal(&imageManifest)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 	imageDescriptor := ociImage.Descriptor{
 		MediaType: "application/vnd.docker.distribution.manifest.v2+json",
 		Size:      int64(len(imageManifestBytes)),
@@ -627,27 +674,41 @@ func export(g graph.Graph, exportRef string) error {
 		content.WithRef(remotes.MakeRefKey(ctx, imageDescriptor)),
 		content.WithDescriptor(imageDescriptor),
 	)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 	_, err = contentWriter.Write(imageManifestBytes)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 	err = contentWriter.Commit(ctx, imageDescriptor.Size, imageDescriptor.Digest)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 
 	imageConfigRef := fmt.Sprintf("%s@%s",
 		namedExportRef.Name(), imageConfigDescriptor.Digest.String())
 	pusher, err := remoteCtx.Resolver.Pusher(ctx, imageConfigRef)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 	err = remotes.PushContent(ctx, pusher,
 		imageConfigDescriptor, imageBackend.ContentStore, remoteCtx.PlatformMatcher, nil)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 
 	imageRef := fmt.Sprintf("%s:latest@%s",
 		namedExportRef.Name(), imageDescriptor.Digest.String())
 	pusher, err = remoteCtx.Resolver.Pusher(ctx, imageRef)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 	err = remotes.PushContent(ctx, pusher,
 		imageDescriptor, imageBackend.ContentStore, remoteCtx.PlatformMatcher, nil)
-	nilordie(err)
+	if err != nil {
+		panic("TODO")
+	}
 	fmt.Println(imageRef)
 
 	return nil

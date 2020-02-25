@@ -25,6 +25,10 @@ import (
 	"github.com/sipsma/containerd/cio"
 )
 
+const (
+	RuncInitArg = "runcinit"
+)
+
 var (
 	capList = []string{
 		"CAP_AUDIT_CONTROL",
@@ -114,7 +118,7 @@ type ContainerDef struct {
 
 func (c ContainerDef) Run(
 	id string, stateDir string,
-) (<-chan *waitResult, func() error, error) {
+) (<-chan *WaitResult, func() error, error) {
 	var cleanupFuncs []func() error
 	withCleanup := func(err error) error {
 		merr := multierror.Append(nil, err)
@@ -149,7 +153,7 @@ func (c ContainerDef) Run(
 	factory, err := libcontainer.New(
 		stateDir,
 		libcontainer.RootlessCgroupfs,
-		libcontainer.InitArgs(os.Args[0], runcInitArg),
+		libcontainer.InitArgs(os.Args[0], RuncInitArg),
 	)
 	if err != nil {
 		return nil, nil, withCleanup(err)
@@ -189,7 +193,7 @@ func (c ContainerDef) Run(
 		return nil
 	})
 
-	waitCh := make(chan *waitResult)
+	waitCh := make(chan *WaitResult)
 	go func() {
 		defer close(waitCh)
 		state, err := ctrProc.Wait()
@@ -198,7 +202,7 @@ func (c ContainerDef) Run(
 			err = multierror.Append(err,
 				errors.Errorf("task exited with non-zero status %d", exitCode)).ErrorOrNil()
 		}
-		waitCh <- &waitResult{state: state, err: err}
+		waitCh <- &WaitResult{State: state, Err: err}
 	}()
 	return waitCh, func() error { return withCleanup(nil) }, nil
 }
@@ -369,7 +373,7 @@ func (c ContainerDef) setup(
 		}
 
 		var symlinkedLowerDirs []string
-		for _, lowerDir := range extractLowerDirs(ociMount.Options) {
+		for _, lowerDir := range ExtractLowerDirs(ociMount.Options) {
 			i += 1
 			lowerLinkName := strconv.Itoa(i)
 			lowerLink := filepath.Join(c.mergedDir(), lowerLinkName)
@@ -602,7 +606,7 @@ func (c ContainerDef) mounts() []oci.Mount {
 				}
 				lowerDirs = append(lowerDirs, ociMount.Source)
 			case "overlay":
-				lowerDirs = append(lowerDirs, extractLowerDirs(ociMount.Options)...)
+				lowerDirs = append(lowerDirs, ExtractLowerDirs(ociMount.Options)...)
 			default:
 				panic("TODO")
 			}
@@ -768,7 +772,7 @@ func (c ContainerDef) dnsFileMounts() []oci.Mount {
 	}
 }
 
-func extractLowerDirs(options []string) []string {
+func ExtractLowerDirs(options []string) []string {
 	opts := make(map[string]string)
 	for _, opt := range options {
 		kv := strings.SplitN(opt, "=", 2)
@@ -791,4 +795,9 @@ func isBind(m oci.Mount) bool {
 		}
 	}
 	return false
+}
+
+type WaitResult struct {
+	State *os.ProcessState
+	Err   error
 }

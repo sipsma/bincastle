@@ -1,4 +1,4 @@
-package ctr
+package buildkit
 
 import (
 	"context"
@@ -58,6 +58,7 @@ import (
 	ociSpec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	"github.com/sipsma/bincastle/util"
+	"github.com/sipsma/bincastle/ctr"
 	"go.etcd.io/bbolt"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -83,7 +84,7 @@ var (
 	}
 )
 
-func build(
+func Build(
 	ctx context.Context,
 	imageName string,
 	llbdef *llb.Definition,
@@ -178,7 +179,7 @@ func build(
 	return eg.Wait()
 }
 
-func buildkitd(ctx context.Context) (<-chan error, *ImageBackend) {
+func Buildkitd(ctx context.Context) (<-chan error, *ImageBackend) {
 	errCh := make(chan error, 1)
 	var err error
 	defer func() {
@@ -605,7 +606,7 @@ func (e *runcExecutor) Exec(
 		mountsByDest[dest] = mountList
 	}
 
-	ctrMounts := make(map[string]MountPoint)
+	ctrMounts := make(map[string]ctr.MountPoint)
 	for dest, mountList := range mountsByDest {
 		for _, execMount := range mountList {
 			snapshotMountable, err := execMount.Src.Mount(ctx, execMount.Readonly)
@@ -631,8 +632,8 @@ func (e *runcExecutor) Exec(
 
 			switch cacheMount.Type {
 			case "overlay":
-				for _, ldSource := range extractLowerDirs(cacheMount.Options) {
-					ctrMounts[dest] = MountPoint{
+				for _, ldSource := range ctr.ExtractLowerDirs(cacheMount.Options) {
+					ctrMounts[dest] = ctr.MountPoint{
 						Lowers: append(ctrMounts[dest].Lowers, ociSpec.Mount{
 							Destination: dest,
 							Type:        "none",
@@ -642,7 +643,7 @@ func (e *runcExecutor) Exec(
 					}
 				}
 			case "bind":
-				ctrMounts[dest] = MountPoint{
+				ctrMounts[dest] = ctr.MountPoint{
 					Lowers: append(ctrMounts[dest].Lowers, ociSpec.Mount{
 						Destination: dest,
 						Type:        "none",
@@ -694,21 +695,21 @@ func (e *runcExecutor) Exec(
 			return multierror.Append(err, release()).ErrorOrNil()
 		}
 
-		ctrMounts[dest] = MountPoint{
+		ctrMounts[dest] = ctr.MountPoint{
 			UpperDir: upperDir,
 			WorkDir:  workDir,
 			Lowers:   overlay.Lowers,
 		}
 	}
 
-	waitCh, cleanupCtr, err := ContainerDef{
+	waitCh, cleanupCtr, err := ctr.ContainerDef{
 		Args:          meta.Args,
 		Env:           meta.Env,
 		WorkingDir:    meta.Cwd,
 		Terminal:      meta.Tty,
 		Uid:           0,
 		Gid:           0,
-		Capabilities:  &AllCaps, // TODO don't hardcode
+		Capabilities:  &ctr.AllCaps, // TODO don't hardcode
 		Mounts:        ctrMounts,
 		EtcResolvPath: e.resolvConfPath(),
 		EtcHostsPath:  e.hostsPath(),
@@ -727,7 +728,7 @@ func (e *runcExecutor) Exec(
 	case <-ctx.Done():
 		execErr = ctx.Err()
 	case waitResult := <-waitCh:
-		execErr = waitResult.err
+		execErr = waitResult.Err
 	}
 	if execErr != nil {
 		return multierror.Append(execErr, release()).ErrorOrNil()
@@ -756,7 +757,3 @@ func (e *runcExecutor) Exec(
 	return multierror.Append(err, release()).ErrorOrNil()
 }
 
-type waitResult struct {
-	state *os.ProcessState
-	err   error
-}
