@@ -240,14 +240,19 @@ func Attach(
 		return nil, nil, withCleanup(err)
 	}
 
+	ctrIOCh := make(chan struct{})
+	go func() {
+		defer close(ctrIOCh)
+		ctrIO.Wait()
+	}()
+
 	ioWait := make(chan struct{})
 	go func() {
 		defer close(ioWait)
-		ctrIO.Wait()
-	}()
-	go func() {
-		defer close(ioWait)
-		<-consoleEscCh
+		select {
+		case <-ctrIOCh:
+		case <-consoleEscCh:
+		}
 	}()
 
 	stdinConsole, err := console.ConsoleFromFile(stdin)
@@ -448,7 +453,9 @@ func (c ContainerDef) setup(
 		if err != nil {
 			return nil, nil, nil, withCleanup(err)
 		}
-		cleanupFuncs = append(cleanupFuncs, parentConsoleSock.Close, ctrConsoleSock.Close)
+		cleanupFuncs = append(cleanupFuncs,
+			parentConsoleSock.Close,
+			ctrConsoleSock.Close)
 
 		// TODO handle errors in here
 		go func() {
@@ -460,8 +467,13 @@ func (c ContainerDef) setup(
 			if err != nil {
 				panic(err)
 			}
-			console.ClearONLCR(ctrConsole.Fd())
 			defer ctrConsole.Close()
+
+			console.ClearONLCR(ctrConsole.Fd())
+			err = ctrConsole.ResizeFrom(console.Current())
+			if err != nil {
+				panic(err)
+			}
 
 			epoller, err := console.NewEpoller()
 			if err != nil {
@@ -481,7 +493,9 @@ func (c ContainerDef) setup(
 		}()
 	}
 
-	return c.spec(finalMounts), ctrConsoleSock, func() error { return withCleanup(nil) }, nil
+	return c.spec(finalMounts), ctrConsoleSock, func() error {
+		return withCleanup(nil)
+	}, nil
 }
 
 func (c ContainerDef) spec(mounts []oci.Mount) *oci.Spec {

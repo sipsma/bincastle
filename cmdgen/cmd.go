@@ -86,53 +86,64 @@ func CmdMain(graphs map[string]graph.Graph) {
 				Action: func(c *cli.Context) error {
 					ctrName := c.Args().First()
 
-					return multierror.Append(
+					err := multierror.Append(
 						os.MkdirAll(workDir, 0700),
 						os.MkdirAll(stateDir, 0700),
 						os.MkdirAll(varDir, 0700),
-						ctrize(ctrName, stateDir, ctr.ContainerDef{
-							Args: []string{"/self",
-								internalPrepareRunArg, ctrName,
-							},
-							Env: withInheritableEnv([]string{
-								"SSH_AUTH_SOCK=/run/ssh-agent.sock",
-							}),
-							WorkingDir:   "/",
-							Terminal:     false,
-							Uid:          0,
-							Gid:          0,
-							Capabilities: &ctr.AllCaps,
-							Mounts: map[string]ctr.MountPoint{
-								"/": ctr.MountPoint{
-									WorkDir: workDir,
-								},
-								"/run/ssh-agent.sock": ctr.MountPoint{
-									Lowers: []specs.Mount{{
-										Source:  sshAgentSock,
-										Options: []string{"bind"},
-									}},
-								},
-								"/var": ctr.MountPoint{
-									Lowers: []specs.Mount{{
-										Source:  varDir,
-										Options: []string{"bind"},
-									}},
-								},
-								"/self": ctr.MountPoint{
-									Lowers: []specs.Mount{{
-										Source:  selfBin,
-										Options: []string{"bind", "ro"},
-									}},
-								},
-							},
-							EtcResolvPath: "/etc/resolv.conf",
-							EtcHostsPath:  "/etc/hosts",
-							Hostname:      "bincastle",
-							Stdin:         os.Stdin,
-							Stdout:        os.Stdout,
-							Stderr:        os.Stderr,
-						}),
 					).ErrorOrNil()
+					if err != nil {
+						return err
+					}
+
+					waitCh, cleanup, err := ctr.ContainerDef{
+						Args: []string{"/self",
+							internalPrepareRunArg, ctrName,
+						},
+						Env: withInheritableEnv([]string{
+							"SSH_AUTH_SOCK=/run/ssh-agent.sock",
+						}),
+						WorkingDir:   "/",
+						Terminal:     false,
+						Uid:          0,
+						Gid:          0,
+						Capabilities: &ctr.AllCaps,
+						Mounts: map[string]ctr.MountPoint{
+							"/": ctr.MountPoint{
+								WorkDir: workDir,
+							},
+							"/run/ssh-agent.sock": ctr.MountPoint{
+								Lowers: []specs.Mount{{
+									Source:  sshAgentSock,
+									Options: []string{"bind"},
+								}},
+							},
+							"/var": ctr.MountPoint{
+								Lowers: []specs.Mount{{
+									Source:  varDir,
+									Options: []string{"bind"},
+								}},
+							},
+							"/self": ctr.MountPoint{
+								Lowers: []specs.Mount{{
+									Source:  selfBin,
+									Options: []string{"bind", "ro"},
+								}},
+							},
+						},
+						EtcResolvPath: "/etc/resolv.conf",
+						EtcHostsPath:  "/etc/hosts",
+						Hostname:      "bincastle",
+						Stdin:         os.Stdin,
+						Stdout:        os.Stdout,
+						Stderr:        os.Stderr,
+					}.Run(ctrName, stateDir)
+					if err != nil {
+						return err
+					}
+
+					defer cleanup()
+					result := <-waitCh
+					return result.Err
 				},
 			},
 			{
@@ -188,7 +199,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 						})
 					}
 
-					return ctrize(ctrName, "/var/state", ctr.ContainerDef{
+					_, cleanup, err := ctr.ContainerDef{
 						Args:         []string{"/bin/bash"},
 						Env:          env,
 						WorkingDir:   "/home/sipsma",
@@ -231,7 +242,14 @@ func CmdMain(graphs map[string]graph.Graph) {
 						EtcResolvPath: "/etc/resolv.conf",
 						EtcHostsPath:  "/etc/hosts",
 						Hostname:      "bincastle",
-					})
+					}.Run(ctrName, "/var/state")
+
+					if err != nil {
+						return err
+					}
+					defer cleanup()
+
+					return attach(ctrName, "/var/state")
 				},
 			},
 
@@ -388,6 +406,7 @@ func withInheritableEnv(finalEnv []string) []string {
 	return finalEnv
 }
 
+// TODO just inline this logic everywhere
 func ctrize(id string, stateDir string, ctrDef ctr.ContainerDef) error {
 	waitCh, cleanup, err := ctrDef.Run(id, stateDir)
 	if err != nil {
