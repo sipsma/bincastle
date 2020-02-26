@@ -934,35 +934,23 @@ func (d stage2Distro) Xz() PkgBuild {
 	))
 }
 
-type distro struct {
+type stage3Distro struct {
 	Pkger
 	distroSources
-	baseSystem       Pkg
-	unpatchedTmp     Graph
-	defaultBuildOpts []llb.RunOption
 }
 
-func (d distro) WithBootstrap(opts ...llb.RunOption) distro {
-	return distro{
-		Pkger: d.Pkger.WithBootstrap(
-			append(d.defaultBuildOpts, opts...)...),
-		distroSources:    d.distroSources,
-		baseSystem:       d.baseSystem,
-		unpatchedTmp:     d.unpatchedTmp,
-		defaultBuildOpts: d.defaultBuildOpts,
-	}
-}
-
-func (d distro) Libc() PkgBuild {
-	return libcbuild.DefaultGlibc(d.WithBootstrap(
-		llb.AddEnv("PATH", "/bin:/usr/bin:/sbin:/usr/sbin:/tools/bin"),
-		d.baseSystem,
-		AtRuntime(Deps(d.baseSystem)),
-	))
-}
-
-func (d distro) LinuxHeaders() PkgBuild {
+func (d stage3Distro) LinuxHeaders() PkgBuild {
 	return linuxbuild.DefaultHeaders(d)
+}
+
+func (d stage3Distro) Libc() PkgBuild {
+	return libcbuild.DefaultGlibc(d)
+}
+
+type distro struct {
+	Pkger
+	stage3Distro
+	distroSources
 }
 
 func (d distro) Manpages() PkgBuild {
@@ -1347,6 +1335,15 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 		),
 	).With(Deps(unpatchedTmp), Name("base-system"))
 
+	stage3 := stage3Distro{
+		Pkger: DefaultPkger(append(defaultBuildOpts,
+			llb.AddEnv("PATH", "/bin:/usr/bin:/sbin:/usr/sbin:/tools/bin"),
+			baseSystem,
+			AtRuntime(Deps(baseSystem)),
+		)...),
+		distroSources: sources,
+	}
+
 	patchedTmp := DefaultPkger().Exec(
 		baseSystem,
 		llb.AddEnv("PATH", "/tools/bin:/bin:/usr/bin"),
@@ -1434,10 +1431,8 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			patchedTmp,
 			AtRuntime(Deps(patchedTmp)),
 		)...),
-		distroSources:    sources,
-		baseSystem:       baseSystem,
-		unpatchedTmp:     unpatchedTmp,
-		defaultBuildOpts: defaultBuildOpts,
+		stage3Distro: stage3,
+		distroSources:  sources,
 	})
 
 	return TrimGraphs(distroGraph, patchedTmp, baseSystem)
