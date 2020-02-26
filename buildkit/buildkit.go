@@ -270,11 +270,6 @@ func newController() (*control.Controller, func() error, *ImageBackend, error) {
 		return nil, nil, nil, err
 	}
 
-	w, err := wc.GetDefault()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
 	frontends := map[string]frontend.Frontend{
 		"gateway.v0": gateway.NewGatewayFrontend(wc),
 	}
@@ -293,7 +288,7 @@ func newController() (*control.Controller, func() error, *ImageBackend, error) {
 	}
 
 	remoteCacheImporterFuncs := map[string]remotecache.ResolveCacheImporterFunc{
-		"registry": registryremotecache.ResolveCacheImporterFunc(sessionManager, w.ContentStore(), resolverFn),
+		"registry": registryremotecache.ResolveCacheImporterFunc(sessionManager, resolverFn),
 		"local":    localremotecache.ResolveCacheImporterFunc(sessionManager),
 	}
 
@@ -390,27 +385,34 @@ func runcWorker(
 
 	imageStore := metadata.NewImageStore(metaDB)
 
-	bkContentStore := bkSnapshot.NewContentStore(metaDB.ContentStore(), ns)
+	// TODO this just disables gc, right?
+	gc := func(context.Context) error {
+		return nil
+	}
+
+	bkContentStore := bkSnapshot.NewContentStore(metaDB.ContentStore(), ns, gc)
+
+	bkMetaDB, err := cacheMetadata.NewStore(filepath.Join(root, "metadata_v2.db"))
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	id, err := base.ID(root)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	labels := base.Labels("oci", snapshotterName)
-	bkSnapshotter := bkSnapshot.NewSnapshotter(snapshotterName, metaDB.Snapshotter(snapshotterName), ns, nil)
-	leaseManager := leaseutil.WithNamespace(metadata.NewLeaseManager(metaDB), "buildkit")
+	bkSnapshotter := bkSnapshot.NewSnapshotter(
+		snapshotterName,
+		metaDB.Snapshotter(snapshotterName),
+		bkContentStore,
+		bkMetaDB,
+		ns,
+		gc,
+		nil,
+	)
 
-	// TODO is this needed?
-	err = cache.MigrateV2(context.TODO(), filepath.Join(root, "metadata.db"), filepath.Join(root, "metadata_v2.db"),
-		bkContentStore, bkSnapshotter, leaseManager)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	bkMetaDB, err := cacheMetadata.NewStore(filepath.Join(root, "metadata_v2.db"))
-	if err != nil {
-		return nil, nil, nil, err
-	}
+	leaseManager := leaseutil.WithNamespace(leaseutil.NewManager(metaDB), "buildkit")
 
 	dnsConfig := &oci.DNSConfig{
 		Nameservers:   []string{"1.1.1.1", "8.8.8.8"},
@@ -436,7 +438,6 @@ func runcWorker(
 		Platforms:       []imageSpec.Platform{platforms.Normalize(platforms.DefaultSpec())},
 		IdentityMapping: nil,
 		LeaseManager:    leaseManager,
-		GarbageCollect:  metaDB.GarbageCollect,
 		ResolveOptionsFunc: resolver.NewResolveOptionsFunc(map[string]resolver.RegistryConf{
 			"docker.io": resolver.RegistryConf{
 				Mirrors: []string{"hub.docker.io"},

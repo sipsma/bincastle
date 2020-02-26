@@ -22,7 +22,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer/utils"
 	oci "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
-	"github.com/sipsma/containerd/cio"
+	"github.com/containerd/containerd/cio"
 )
 
 const (
