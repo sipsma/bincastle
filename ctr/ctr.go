@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/containerd/console"
 	"github.com/containerd/fifo"
 	"github.com/docker/docker/pkg/term"
@@ -388,6 +390,9 @@ func (c ContainerDef) setup(
 				return nil, nil, nil, withCleanup(fmt.Errorf(
 					"failed to symlink lower dir: %v", err))
 			}
+			cleanupFuncs = append(cleanupFuncs, func() error {
+				return unix.Unlink(lowerLink)
+			})
 
 			symlinkedLowerDirs = append(symlinkedLowerDirs, lowerLinkName)
 		}
