@@ -2,29 +2,27 @@ package ctr
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/containerd/console"
+	"github.com/containerd/containerd/cio"
 	"github.com/containerd/fifo"
-	"github.com/docker/docker/pkg/term"
 	"github.com/hashicorp/go-multierror"
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/specconv"
 	"github.com/opencontainers/runc/libcontainer/utils"
 	oci "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/pkg/errors"
-	"github.com/containerd/containerd/cio"
 )
 
 const (
@@ -82,64 +80,315 @@ var (
 	}
 )
 
-func nilordie(err error) {
+type ContainerStateRoot string
+
+func (d ContainerStateRoot) ContainerState(containerID string) ContainerState {
+	return ContainerState(filepath.Join(string(d), containerID))
+}
+
+type ContainerState string
+
+func (d ContainerState) RuncStateDir() string {
+	return filepath.Join(string(d), d.ContainerID())
+}
+
+func (d ContainerState) IODir() IODir {
+	return IODir(filepath.Join(string(d), "io"))
+}
+
+func (d ContainerState) InnerDir() string {
+	return filepath.Join(string(d), "inner")
+}
+
+func (d ContainerState) rootfsDir() string {
+	return filepath.Join(string(d), "rootfs")
+}
+
+func (d ContainerState) lowerDirSymlink(index uint) string {
+	// TODO use a denser base than 10, but be sure to only include fs-safe chars
+	return filepath.Join(d.rootfsDir(), strconv.Itoa(int(index)))
+}
+
+func (d ContainerState) OverlayDir(ctrPath string) OverlayDir {
+	return OverlayDir(filepath.Join(string(d), "overlays",
+		base64.RawURLEncoding.EncodeToString([]byte(ctrPath))))
+}
+
+func (d ContainerState) ContainerID() string {
+	return filepath.Base(string(d))
+}
+
+type ContainerExistsError struct {
+	ID string
+}
+
+func (e ContainerExistsError) Error() string {
+	return fmt.Sprintf("container %q already exists", e.ID)
+}
+
+func (d ContainerState) factory() (libcontainer.Factory, error) {
+	return libcontainer.New(string(d),
+		libcontainer.RootlessCgroupfs,
+		libcontainer.InitArgs(os.Args[0], RuncInitArg),
+	)
+}
+
+// TODO use some locking approach (maybe an O_EXCL file?) to make it possible
+// to check this and then Start() "atomically"
+func (d ContainerState) ContainerExists() bool {
+	factory, err := d.factory()
 	if err != nil {
-		panic(err)
+		return false // TODO really safe?
 	}
+
+	_, err = factory.Load(d.ContainerID())
+	return err == nil
 }
 
-// TODO this enables you to combine separate bind+overlay
-// mounts into one single overlay at a given location. It's
-// very strange and introduces a lot of complication to
-// ContainerDef though. One better option would be for
-// ContainerDef to just accept plain old oci.Mounts and then
-// create an independent helper function for turning a slice of
-// bind+overlay mounts into a single merged overlay
-type MountPoint struct {
-	UpperDir string
-	WorkDir  string
-	Lowers   []oci.Mount
-}
+func (d ContainerState) Start(def ContainerDef) (Container, error) {
+	if d.ContainerExists() {
+		return nil, ContainerExistsError{d.ContainerID()}
+	}
 
-type ContainerDef struct {
-	Args          []string
-	Env           []string
-	WorkingDir    string
-	Terminal      bool
-	Uid           uint32
-	Gid           uint32
-	Capabilities  *oci.LinuxCapabilities
-	Mounts        map[string]MountPoint
-	EtcResolvPath string
-	EtcHostsPath  string
-	Hostname      string
-	Stdin         io.Reader
-	Stdout        io.Writer
-	Stderr        io.Writer
-}
+	cleanups := CleanupStack(nil).Push(func() error {
+		return os.RemoveAll(string(d))
+	})
 
-func (c ContainerDef) Run(
-	id string, stateDir string,
-) (<-chan *WaitResult, func() error, error) {
-	var cleanupFuncs []func() error
-	withCleanup := func(err error) error {
-		merr := multierror.Append(nil, err)
-		for i := range cleanupFuncs {
-			merr = multierror.Append(merr, cleanupFuncs[len(cleanupFuncs)-1-i]())
+	err := os.MkdirAll(string(d.IODir()), 0700)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create container io dir: %w", err)
+	}
+
+	err = os.MkdirAll(d.InnerDir(), 0700)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create container inner dir: %w", err)
+	}
+
+	err = os.MkdirAll(d.rootfsDir(), 0700)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create container rootfs dir: %w", err)
+	}
+
+	mounts, err := def.Mounts.OCIMounts(d)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to merge mounts for %s: %w", d.ContainerID(), err)
+	}
+	sortedMounts := sortMounts(mounts)
+
+	var lowerdirIndex uint
+	for i, m := range sortedMounts {
+		if m.Type != "overlay" {
+			continue
 		}
-		return merr.ErrorOrNil()
-	}
+		overlayDir := d.OverlayDir(m.Destination)
+		overlayOpts := parseOverlay(m.Options)
 
-	ociSpec, ctrConsoleSock, setupCleanup, err := c.setup(id, stateDir)
+		err = os.MkdirAll(overlayOpts.UpperDir, 0700)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create upper dir: %w", err)
+		}
+
+		err = os.MkdirAll(overlayOpts.WorkDir, 0700)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create work dir: %w", err)
+		}
+
+		err = os.MkdirAll(overlayDir.PrivateDir(), 0700)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"failed to create private lower dir: %w", err)
+		}
+
+		if i < len(sortedMounts)-1 {
+			for _, laterMount := range sortedMounts[i+1:] {
+				if !isUnderDir(laterMount.Destination, m.Destination) {
+					continue
+				}
+
+				relPath, err := filepath.Rel(m.Destination, laterMount.Destination)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"failed to get rel path for private lower dir: %w", err)
+				}
+				privateDest := filepath.Join(overlayDir.PrivateDir(), relPath)
+
+				if HasBind(laterMount.Options) || HasRBind(laterMount.Options) {
+					stat, err := os.Stat(laterMount.Source)
+					if err != nil {
+						return nil, fmt.Errorf(
+							"failed to stat bind mount dest for private lower dir: %w", err)
+					}
+					if !stat.IsDir() {
+						// TODO just assuming it's a file, should handle other cases?
+						parentDir := filepath.Dir(privateDest)
+						err := os.MkdirAll(parentDir, 0700) // TODO set same perms
+						if err != nil {
+							return nil, fmt.Errorf(
+								"failed to mkdir bind mount dest parent dir for private lower dir: %w", err)
+						}
+						err = ioutil.WriteFile(privateDest, nil, 0700) // TODO fix perms
+						if err != nil && !os.IsNotExist(err) {
+							return nil, fmt.Errorf(
+								"failed to touch bind mount dest for private lower dir: %w", err)
+						}
+						continue
+					}
+				}
+
+				err = os.MkdirAll(privateDest, 0700) // TODO fix perms
+				if err != nil {
+					return nil, fmt.Errorf(
+						"failed to mkdir private lower dir: %w", err)
+				}
+			}
+		}
+
+		overlayOpts.LowerDirs = append(overlayOpts.LowerDirs,
+			overlayDir.PrivateDir())
+
+		// setup shorthand lowerdir symlinks, which
+		// help keep the length of the options provided to the mount syscall
+		// under its 1 page size limit
+		var newLowerdirs []string
+		for _, lowerdir := range overlayOpts.LowerDirs {
+			newLowerdir := d.lowerDirSymlink(lowerdirIndex)
+			lowerdirIndex += 1
+			newLowerdirs = append(newLowerdirs, filepath.Base(newLowerdir))
+
+			err = os.Symlink(lowerdir, newLowerdir)
+			if err != nil && !os.IsNotExist(err) {
+				return nil, fmt.Errorf(
+					"failed to symlink lowerdir: %w", err)
+			}
+		}
+
+		mounts[m.Destination] = oci.Mount{
+			Source:      m.Source,
+			Destination: m.Destination,
+			Type:        m.Type,
+			Options: overlayOptions{
+				LowerDirs: newLowerdirs,
+				UpperDir:  overlayOpts.UpperDir,
+				WorkDir:   overlayOpts.WorkDir,
+				Extra:     overlayOpts.Extra,
+			}.OptionsSlice(),
+		}
+	}
+	sortedMounts = sortMounts(mounts)
+	fmt.Printf("%+v\n", sortedMounts)
+
+	inFifo, err := fifo.OpenFifo(context.TODO(), d.IODir().TTYInFifo(),
+		syscall.O_CREAT|syscall.O_RDONLY|syscall.O_NONBLOCK, 0200)
 	if err != nil {
-		return nil, nil, withCleanup(err)
+		return nil, fmt.Errorf("failed to create tty in fifo: %w", err)
 	}
-	cleanupFuncs = append(cleanupFuncs, setupCleanup)
+	cleanups = cleanups.Push(inFifo.Close)
 
-	fmt.Println(ociSpec)
+	outFifo, err := fifo.OpenFifo(context.TODO(), d.IODir().TTYOutFifo(),
+		syscall.O_CREAT|syscall.O_WRONLY|syscall.O_NONBLOCK, 0400)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tty out fifo: %w", err)
+	}
+	cleanups = cleanups.Push(outFifo.Close)
+
+	parentConsoleSock, ctrConsoleSock, err := utils.NewSockPair("console")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tty console sock: %w", err)
+	}
+	cleanups = cleanups.Push(ctrConsoleSock.Close)
+
+	epoller, err := console.NewEpoller()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create epoller: %w", err)
+	}
+	cleanups = cleanups.Push(epoller.Close)
+
+	go func() {
+		// TODO need real logging
+		f, err := utils.RecvFd(parentConsoleSock)
+		parentConsoleSock.Close()
+		if err != nil {
+			fmt.Printf("failed to receive tty fd: %v\n", err)
+			return
+		}
+		ctrConsole, err := console.ConsoleFromFile(f)
+		if err != nil {
+			panic(err)
+		}
+		defer ctrConsole.Close()
+
+		console.ClearONLCR(ctrConsole.Fd())
+		err = ctrConsole.ResizeFrom(console.Current())
+		if err != nil {
+			panic(err)
+		}
+
+		epollConsole, err := epoller.Add(ctrConsole)
+		if err != nil {
+			panic(err)
+		}
+
+		go io.Copy(epollConsole, inFifo)
+		go io.Copy(outFifo, epollConsole)
+		epoller.Wait()
+	}()
+
+	noNewPrivileges := true
+	var caps *configs.Capabilities
+	if def.Capabilities != nil {
+		caps = &configs.Capabilities{
+			Bounding:    def.Capabilities.Bounding,
+			Effective:   def.Capabilities.Effective,
+			Inheritable: def.Capabilities.Inheritable,
+			Permitted:   def.Capabilities.Permitted,
+			Ambient:     def.Capabilities.Ambient,
+		}
+	}
+	runcProc := libcontainer.Process{
+		Init:            true,
+		User:            "0:0",
+		Args:            def.Args,
+		Env:             def.Env,
+		Cwd:             def.WorkingDir,
+		Capabilities:    caps,
+		NoNewPrivileges: &noNewPrivileges,
+		ConsoleSocket:   ctrConsoleSock,
+	}
 
 	runcConfig, err := specconv.CreateLibcontainerConfig(&specconv.CreateOpts{
-		Spec:             ociSpec,
+		Spec: &oci.Spec{
+			Root: &oci.Root{
+				Path:     d.rootfsDir(),
+				Readonly: false,
+			},
+			Hostname: def.Hostname,
+			Mounts:   sortedMounts,
+			Linux: &oci.Linux{
+				UIDMappings: []oci.LinuxIDMapping{
+					{
+						ContainerID: 0,
+						HostID:      def.Uid,
+						Size:        1,
+					},
+				},
+				GIDMappings: []oci.LinuxIDMapping{
+					{
+						ContainerID: 0,
+						HostID:      def.Gid,
+						Size:        1,
+					},
+				},
+				Namespaces: []oci.LinuxNamespace{
+					{Type: oci.MountNamespace},
+					{Type: oci.PIDNamespace},
+					{Type: oci.UserNamespace},
+					{Type: oci.UTSNamespace},
+					{Type: oci.IPCNamespace},
+					// TODO {Type: configs.NEWCGROUP},
+				},
+			},
+		},
 		CgroupName:       "",
 		UseSystemdCgroup: false,
 		NoPivotRoot:      false,
@@ -148,99 +397,157 @@ func (c ContainerDef) Run(
 		RootlessCgroups:  true,
 	})
 	if err != nil {
-		return nil, nil, withCleanup(err)
+		return nil, err
 	}
 	runcConfig.Cgroups = nil
 
-	factory, err := libcontainer.New(
-		stateDir,
-		libcontainer.RootlessCgroupfs,
-		libcontainer.InitArgs(os.Args[0], RuncInitArg),
-	)
+	factory, err := d.factory()
 	if err != nil {
-		return nil, nil, withCleanup(err)
+		return nil, err
 	}
 
-	runcCtr, err := factory.Create(id, runcConfig)
+	c, err := factory.Create(d.ContainerID(), runcConfig)
 	if err != nil {
-		return nil, nil, withCleanup(err)
-	}
-	cleanupFuncs = append(cleanupFuncs, runcCtr.Destroy)
-
-	ctrProc := &libcontainer.Process{
-		Init:          true,
-		Args:          c.Args,
-		Env:           c.Env,
-		Stdin:         c.Stdin,
-		Stdout:        c.Stdout,
-		Stderr:        c.Stderr,
-		ConsoleSocket: ctrConsoleSock,
-		// TODO don't grant all caps by default
-		Capabilities: &configs.Capabilities{
-			Bounding:    AllCaps.Bounding,
-			Effective:   AllCaps.Effective,
-			Permitted:   AllCaps.Permitted,
-			Inheritable: AllCaps.Inheritable,
-			Ambient:     AllCaps.Ambient,
-		},
+		return nil, err
 	}
 
-	err = runcCtr.Run(ctrProc)
+	err = c.Run(&runcProc)
 	if err != nil {
-		return nil, nil, withCleanup(err)
+		return nil, err
 	}
-	cleanupFuncs = append(cleanupFuncs, func() error {
-		// TODO don't fully ignore, return error if it's not that the container was already dead
-		runcCtr.Signal(syscall.SIGKILL, true)
-		return nil
-	})
 
-	waitCh := make(chan *WaitResult)
-	go func() {
-		defer close(waitCh)
-		state, err := ctrProc.Wait()
-		exitCode := state.ExitCode()
-		if exitCode != 0 {
-			err = multierror.Append(err,
-				errors.Errorf("task exited with non-zero status %d", exitCode)).ErrorOrNil()
-		}
-		waitCh <- &WaitResult{State: state, Err: err}
-	}()
-	return waitCh, func() error { return withCleanup(nil) }, nil
+	return &container{
+		state:        d,
+		initProc:     runcProc,
+		runcCtr:      c,
+		cleanupStack: cleanups,
+		mounts:       mounts,
+	}, nil
 }
 
-// TODO somehow handle window size updates (gonna require talking to the proc holding pty)
-func Attach(
-	id string,
-	stateDir string,
-	stdin *os.File,
-	stdout io.Writer,
-) (<-chan struct{}, func() error, error) {
-	var cleanupFuncs []func() error
-	withCleanup := func(err error) error {
-		merr := multierror.Append(nil, err)
-		for i := range cleanupFuncs {
-			merr = multierror.Append(merr, cleanupFuncs[len(cleanupFuncs)-1-i]())
+type OverlayDir string
+
+func (d OverlayDir) UpperDir() string {
+	return filepath.Join(string(d), "upper")
+}
+
+func (d OverlayDir) WorkDir() string {
+	return filepath.Join(string(d), "work")
+}
+
+func (d OverlayDir) PrivateDir() string {
+	return filepath.Join(string(d), "private")
+}
+
+type IODir string
+
+func (d IODir) TTYOutFifo() string {
+	return filepath.Join(string(d), "out")
+}
+
+func (d IODir) TTYInFifo() string {
+	return filepath.Join(string(d), "in")
+}
+
+type Attachable interface {
+	Attach(ctx context.Context, in io.Reader, out io.Writer) error
+}
+
+type Container interface {
+	Attachable
+	Wait(context.Context) WaitResult
+	Destroy(context.Context) error
+	DiffDirs() map[string]string
+}
+
+type ContainerProc struct {
+	Args         []string
+	Env          []string
+	WorkingDir   string
+	Uid          uint32
+	Gid          uint32
+	Capabilities *oci.LinuxCapabilities
+}
+
+type ContainerDef struct {
+	ContainerProc
+	Hostname string
+	Mounts   Mounts
+}
+
+type CleanupStack []func() error
+
+func (cleanups CleanupStack) Push(f func() error) CleanupStack {
+	return append([]func() error{f}, cleanups...)
+}
+func (cleanups CleanupStack) Cleanup() error {
+	var err error
+	for _, cleanup := range cleanups {
+		err = multierror.Append(err, cleanup()).ErrorOrNil()
+	}
+	return err
+}
+
+type container struct {
+	state        ContainerState
+	initProc     libcontainer.Process
+	runcCtr      libcontainer.Container
+	cleanupStack CleanupStack
+	mounts       map[string]oci.Mount
+}
+
+func (c *container) DiffDirs() map[string]string {
+	diffDirs := make(map[string]string)
+	for dest, m := range c.mounts {
+		if m.Type != "overlay" {
+			continue
 		}
-		return merr.ErrorOrNil()
+		diffDirs[dest] = parseOverlay(m.Options).UpperDir
+	}
+	return diffDirs
+}
+
+// TODO add a feature where the upper dir can be spared from destruction,
+// allowing any changes to be persisted across container restarts.
+func (c *container) Destroy(ctx context.Context) error {
+	// TODO use ctx to enforce timeout
+	// TODO something gentler than immediate SIGKILL
+	err := c.runcCtr.Signal(syscall.SIGKILL, true)
+	if err != nil {
+		return fmt.Errorf("failed to SIGKILL container: %w", err)
 	}
 
-	// escape is ctrl-p,ctrl-q, borrowed from
-	// https://github.com/moby/moby/blob/8e610b2b55bfd1bfa9436ab110d311f5e8a74dcb/container/stream/attach.go#L14
-	escapedStdin, consoleEscCh := NewEscapedReader(stdin, []byte{16, 17})
+	// TODO use ctx to enforce timeout
+	err = c.runcCtr.Destroy()
+	if err != nil {
+		return fmt.Errorf("failed to destroy container: %w", err)
+	}
+
+	return c.cleanupStack.Cleanup()
+}
+
+func (c *container) Attach(ctx context.Context, in io.Reader, out io.Writer) error {
+	var inFifoPath string
+	if in != nil {
+		inFifoPath = c.state.IODir().TTYInFifo()
+	}
+
+	var outFifoPath string
+	if out != nil {
+		outFifoPath = c.state.IODir().TTYOutFifo()
+	}
 
 	ctrIO, err := cio.NewAttach(cio.WithStreams(
-		escapedStdin, stdout, nil,
+		in, out, nil,
 	), cio.WithTerminal)(cio.NewFIFOSet(cio.Config{
 		Terminal: true,
-		// TODO really shouldn't be using the state dir for this (implies existence of container
-		// named id+"io"
-		Stdin:  filepath.Join(stateDir, id+"-io", "stdin"),
-		Stdout: filepath.Join(stateDir, id+"-io", "stdout"),
+		Stdin:    inFifoPath,
+		Stdout:   outFifoPath,
 	}, func() error { return nil }))
 	if err != nil {
-		return nil, nil, withCleanup(err)
+		return fmt.Errorf("failed to attach to tty fifos: %w", err)
 	}
+	defer ctrIO.Close()
 
 	ctrIOCh := make(chan struct{})
 	go func() {
@@ -248,550 +555,433 @@ func Attach(
 		ctrIO.Wait()
 	}()
 
-	ioWait := make(chan struct{})
-	go func() {
-		defer close(ioWait)
-		select {
-		case <-ctrIOCh:
-		case <-consoleEscCh:
-		}
-	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-ctrIOCh:
+		return nil
+	}
+}
 
-	stdinConsole, err := console.ConsoleFromFile(stdin)
+func AttachConsole(ctx context.Context, attacher Attachable) error {
+	stdinConsole, err := console.ConsoleFromFile(os.Stdin)
 	if err != nil {
-		return nil, nil, withCleanup(err)
+		return fmt.Errorf("failed to open stdin as tty: %w", err)
 	}
 	err = stdinConsole.SetRaw()
 	if err != nil {
-		return nil, nil, withCleanup(err)
+		return fmt.Errorf("failed to set stdin tty as raw: %w", err)
 	}
-	cleanupFuncs = append(cleanupFuncs, stdinConsole.Reset)
+	defer stdinConsole.Reset()
 
-	// TODO need better signal handling
+	attachCh := make(chan error)
 	go func() {
-		sigchan := make(chan os.Signal, 1)
-		signal.Notify(sigchan, os.Interrupt)
-		<-sigchan
-		stdinConsole.Reset()
-		os.Exit(0)
+		defer close(attachCh)
+		attachCh <- attacher.Attach(ctx, os.Stdin, os.Stdout)
 	}()
 
-	return ioWait, func() error { return withCleanup(nil) }, nil
-}
+	// TODO need more configurable signal handling
+	// This ensures that we reset the console before the process exits.
+	// If you don't, when you drop back to a shell it behaves very "raw"
+	// (which is to say, weird).
+	sigchan := make(chan os.Signal, 1)
+	signal.Notify(sigchan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 
-type EscapedReader struct {
-	escapeProxy io.Reader
-	ch          chan<- struct{}
-}
-
-func NewEscapedReader(reader io.Reader, escapeKeys []byte) (io.Reader, <-chan struct{}) {
-	ch := make(chan struct{})
-	return &EscapedReader{
-		escapeProxy: term.NewEscapeProxy(reader, escapeKeys),
-		ch:          ch,
-	}, ch
-}
-
-func (r *EscapedReader) Read(buf []byte) (int, error) {
-	n, err := r.escapeProxy.Read(buf)
-	if err != nil {
-		close(r.ch)
+	select {
+	case err := <-attachCh:
+		return err
+	case <-sigchan:
+		panic("sigint, sigterm or sighup during console attach")
 	}
-	return n, err
 }
 
-func (c ContainerDef) setup(
-	id string, stateDir string,
-) (*oci.Spec, *os.File, func() error, error) {
-	var cleanupFuncs []func() error
-	withCleanup := func(err error) error {
-		merr := multierror.Append(nil, err)
-		for i := range cleanupFuncs {
-			merr = multierror.Append(merr, cleanupFuncs[len(cleanupFuncs)-1-i]())
+func (c *container) Wait(ctx context.Context) WaitResult {
+	waitCh := make(chan WaitResult)
+	go func() {
+		state, err := c.initProc.Wait()
+		exitCode := state.ExitCode()
+		if exitCode != 0 {
+			err = multierror.Append(err, fmt.Errorf(
+				"task exited with non-zero status %d", exitCode)).ErrorOrNil()
 		}
-		return merr.ErrorOrNil()
+		waitCh <- WaitResult{State: state, Err: err}
+	}()
+
+	select {
+	case waitResult := <-waitCh:
+		return waitResult
+	case <-ctx.Done():
+		return WaitResult{Err: ctx.Err()}
 	}
+}
 
-	err := os.MkdirAll(filepath.Join(c.Mounts["/"].WorkDir, "overlayWork"), 0700)
-	if err != nil {
-		return nil, nil, nil, withCleanup(fmt.Errorf(
-			"failed to mkdir overlayWork: %v", err))
-	}
+type Mounts []Mountable
 
-	err = os.MkdirAll(filepath.Join(c.Mounts["/"].WorkDir, "merged"), 0700)
-	if err != nil {
-		return nil, nil, nil, withCleanup(fmt.Errorf(
-			"failed to mkdir root overlay merged: %v", err))
-	}
+func (mounts Mounts) With(more ...Mountable) Mounts {
+	return append(mounts, more...)
+}
 
-	var finalMounts []oci.Mount
-	for _, ociMount := range c.mounts() {
-		if ociMount.Destination == "/" {
-			finalMounts = append(finalMounts, ociMount)
-			continue
-		}
-
-		privateDirPath := filepath.Join(c.privateDir(), ociMount.Destination)
-		if isBind(ociMount) {
-			// TODO how much do we care about TOCTTOU here?
-			stat, err := os.Stat(ociMount.Source)
-			if err != nil {
-				return nil, nil, nil, withCleanup(fmt.Errorf(
-					"failed to stat private exec source: %v", err))
-			}
-
-			if !stat.IsDir() {
-				// TODO just assuming it's a file, should handle other cases?
-				parentDir := filepath.Dir(privateDirPath)
-				err := os.MkdirAll(parentDir, 0700)
-				if err != nil {
-					return nil, nil, nil, withCleanup(fmt.Errorf(
-						"failed to mk private exec parent dir: %v", err))
-				}
-				cleanupFuncs = append(cleanupFuncs, func() error {
-					return os.RemoveAll(parentDir)
-				})
-				err = ioutil.WriteFile(privateDirPath, nil, 0700)
-				if err != nil {
-					return nil, nil, nil, withCleanup(fmt.Errorf(
-						"failed to mk private exec empty file: %v", err))
-				}
-				finalMounts = append(finalMounts, ociMount)
-				continue
-			}
-		}
-
-		err := os.MkdirAll(privateDirPath, 0700)
+func (mounts Mounts) OCIMounts(state ContainerState) (map[string]oci.Mount, error) {
+	ociMounts := make(map[string]oci.Mount)
+	for _, m := range mounts {
+		err := m.AddMount(state, ociMounts)
 		if err != nil {
-			return nil, nil, nil, withCleanup(fmt.Errorf(
-				"failed to mk private dir: %v", err))
-		}
-		cleanupFuncs = append(cleanupFuncs, func() error {
-			return os.RemoveAll(privateDirPath)
-		})
-
-		finalMounts = append(finalMounts, ociMount)
-	}
-
-	var i int
-	for mountIndex, ociMount := range finalMounts {
-		if ociMount.Type != "overlay" {
-			continue
-		}
-
-		var symlinkedLowerDirs []string
-		for _, lowerDir := range ExtractLowerDirs(ociMount.Options) {
-			i += 1
-			lowerLinkName := strconv.Itoa(i)
-			lowerLink := filepath.Join(c.mergedDir(), lowerLinkName)
-
-			err := os.Symlink(lowerDir, lowerLink)
-			if err != nil {
-				return nil, nil, nil, withCleanup(fmt.Errorf(
-					"failed to symlink lower dir: %v", err))
-			}
-			cleanupFuncs = append(cleanupFuncs, func() error {
-				return unix.Unlink(lowerLink)
-			})
-
-			symlinkedLowerDirs = append(symlinkedLowerDirs, lowerLinkName)
-		}
-
-		// TODO also shorten work+upper dir
-		var finalOptions []string
-		for _, kv := range ociMount.Options {
-			if strings.HasPrefix(kv, "lowerdir=") {
-				finalOptions = append(finalOptions,
-					"lowerdir="+strings.Join(symlinkedLowerDirs, ":"))
-			} else {
-				finalOptions = append(finalOptions, kv)
-			}
-		}
-
-		finalMounts[mountIndex] = oci.Mount{
-			Destination: ociMount.Destination,
-			Type: ociMount.Type,
-			Source: ociMount.Source,
-			Options: finalOptions,
+			return nil, err
 		}
 	}
-
-	var ctrConsoleSock *os.File
-	if c.Terminal {
-		// TODO return error if they were set?
-		c.Stdin = nil
-		c.Stdout = nil
-		c.Stderr = nil
-
-		err := os.MkdirAll(filepath.Join(stateDir, id+"-io"), 0700)
-		if err != nil {
-			return nil, nil, nil, withCleanup(err)
-		}
-		cleanupFuncs = append(cleanupFuncs, func() error {
-			return os.RemoveAll(filepath.Join(stateDir, id))
-		})
-
-		stdinFifoPath := filepath.Join(stateDir, id+"-io", "stdin")
-		stdinFifo, err := fifo.OpenFifo(context.Background(), stdinFifoPath,
-			syscall.O_CREAT|syscall.O_RDWR|syscall.O_NONBLOCK, 0200)
-		if err != nil {
-			return nil, nil, nil, withCleanup(err)
-		}
-		cleanupFuncs = append(cleanupFuncs, func() error {
-			return os.RemoveAll(stdinFifoPath)
-		})
-		cleanupFuncs = append(cleanupFuncs, stdinFifo.Close)
-
-		stdoutFifoPath := filepath.Join(stateDir, id+"-io", "stdout")
-		stdoutFifo, err := fifo.OpenFifo(context.Background(), stdoutFifoPath,
-			syscall.O_CREAT|syscall.O_RDWR|syscall.O_NONBLOCK, 0400)
-		if err != nil {
-			return nil, nil, nil, withCleanup(err)
-		}
-		cleanupFuncs = append(cleanupFuncs, func() error {
-			return os.RemoveAll(stdoutFifoPath)
-		})
-		cleanupFuncs = append(cleanupFuncs, stdoutFifo.Close)
-
-		var parentConsoleSock *os.File
-		parentConsoleSock, ctrConsoleSock, err = utils.NewSockPair("console")
-		if err != nil {
-			return nil, nil, nil, withCleanup(err)
-		}
-		cleanupFuncs = append(cleanupFuncs,
-			parentConsoleSock.Close,
-			ctrConsoleSock.Close)
-
-		// TODO handle errors in here
-		go func() {
-			f, err := utils.RecvFd(parentConsoleSock)
-			if err != nil {
-				panic(err)
-			}
-			ctrConsole, err := console.ConsoleFromFile(f)
-			if err != nil {
-				panic(err)
-			}
-			defer ctrConsole.Close()
-
-			console.ClearONLCR(ctrConsole.Fd())
-			err = ctrConsole.ResizeFrom(console.Current())
-			if err != nil {
-				panic(err)
-			}
-
-			epoller, err := console.NewEpoller()
-			if err != nil {
-				panic(err)
-			}
-			defer epoller.Close()
-
-			epollConsole, err := epoller.Add(ctrConsole)
-			if err != nil {
-				panic(err)
-			}
-			defer epollConsole.Close()
-
-			go io.Copy(epollConsole, stdinFifo)
-			go io.Copy(stdoutFifo, epollConsole)
-			epoller.Wait()
-		}()
-	}
-
-	return c.spec(finalMounts), ctrConsoleSock, func() error {
-		return withCleanup(nil)
-	}, nil
+	return ociMounts, nil
 }
 
-func (c ContainerDef) spec(mounts []oci.Mount) *oci.Spec {
-	return &oci.Spec{
-		Root: &oci.Root{
-			Path:     c.mergedDir(),
-			Readonly: false,
-		},
-		Hostname: c.Hostname,
-		Mounts:   mounts,
-		Linux: &oci.Linux{
-			UIDMappings: []oci.LinuxIDMapping{
-				{
-					ContainerID: 0,
-					HostID:      c.Uid,
-					Size:        1,
-				},
-			},
-			GIDMappings: []oci.LinuxIDMapping{
-				{
-					ContainerID: 0,
-					HostID:      c.Gid,
-					Size:        1,
-				},
-			},
-
-			Namespaces: []oci.LinuxNamespace{
-				{Type: oci.MountNamespace},
-				{Type: oci.PIDNamespace},
-				{Type: oci.UserNamespace},
-				{Type: oci.UTSNamespace},
-				{Type: oci.IPCNamespace},
-				// TODO {Type: configs.NEWCGROUP},
-			},
-		},
-
-		Process: &oci.Process{
-			Terminal: c.Terminal,
-			User: oci.User{
-				UID: 0,
-				GID: 0,
-			},
-			Args:            c.Args,
-			Env:             c.Env,
-			Cwd:             c.WorkingDir,
-			Capabilities:    c.Capabilities,
-			NoNewPrivileges: true,
-		},
-	}
+type Mountable interface {
+	AddMount(state ContainerState, mounts map[string]oci.Mount) error
 }
 
-func (c ContainerDef) privateDir() string {
-	// TODO don't reuse "/"'s workdir', need a separate privateDir
-	// per overlay
-	rootWorkDir := c.Mounts["/"].WorkDir
-	if rootWorkDir == "" {
-		panic("TODO")
-	}
-	return filepath.Join(rootWorkDir, "private")
+type GenericMountOptions struct {
+	Noexec      bool
+	Nosuid      bool
+	Nodev       bool
+	Strictatime bool
 }
 
-func (c ContainerDef) mergedDir() string {
-	// TODO don't reuse "/"'s workdir', need a fallback in case
-	// "/" is not an overlay (or enforce that "/" is an overlay)
-	rootWorkDir := c.Mounts["/"].WorkDir
-	if rootWorkDir == "" {
-		panic("TODO")
+func (o GenericMountOptions) Opts() []string {
+	var opts []string
+	if o.Noexec {
+		opts = append(opts, "noexec")
 	}
-	return filepath.Join(rootWorkDir, "merged")
+	if o.Nosuid {
+		opts = append(opts, "nosuid")
+	}
+	if o.Nodev {
+		opts = append(opts, "nodev")
+	}
+	if o.Strictatime {
+		opts = append(opts, "strictatime")
+	}
+	return opts
 }
 
-func (c ContainerDef) mounts() []oci.Mount {
-	var rootMounts []oci.Mount
-	var mounts []oci.Mount
-	for dest, overlay := range c.Mounts {
-		upperDir := overlay.UpperDir
-		workDir := overlay.WorkDir
-		lowerMounts := overlay.Lowers
-
-		// TODO the ability to prevent submounts from
-		// impacting the upper dir of an overlay should
-		// work for non-"/" mounts
-		if dest == "/" {
-			lowerMounts = append(lowerMounts, oci.Mount{
-				Source: c.privateDir(),
-				Options: []string{"bind"},
-			})
-
-			// TODO fix the confusing names here... "WorkDir" should
-			// really be called "ScratchDir" or something so it's not
-			// confused w/ the overlay work dir. 
-			workDir = filepath.Join(workDir, "overlayWork")
+func ParseGenericMountOpts(options []string) GenericMountOptions {
+	genericMountOptions := GenericMountOptions{}
+	for _, opt := range options {
+		switch opt {
+		case "noexec":
+			genericMountOptions.Noexec = true
+		case "nosuid":
+			genericMountOptions.Nosuid = true
+		case "nodev":
+			genericMountOptions.Nodev = true
+		case "strictatime":
+			genericMountOptions.Strictatime = true
 		}
+	}
+	return genericMountOptions
+}
 
-		if len(lowerMounts) == 0 {
-			continue
-		}
+type MergedMount struct {
+	Dest    string
+	Sources []string
+	GenericMountOptions
+}
 
-		if upperDir == "" && len(lowerMounts) == 1 {
-			// TODO should lowerMounts[0] be validated in this case?
-			newMount := oci.Mount{
-				Source: lowerMounts[0].Source,
-				Type: lowerMounts[0].Type,
-				Destination: dest,
-				Options: lowerMounts[0].Options,
-			}
+func (m MergedMount) AddMount(
+	state ContainerState, mounts map[string]oci.Mount,
+) error {
+	if len(m.Sources) == 0 {
+		return nil
+	}
 
-			if dest == "/" {
-				rootMounts = append(rootMounts, newMount)
-			} else {
-				mounts = append(mounts, newMount)
-			}
-			continue
-		}
+	// TODO validation, like being an abs path
 
-		var lowerDirs []string
-		for _, ociMount := range lowerMounts {
-			switch ociMount.Type {
-			case "", "none", "bind":
-				if !isBind(ociMount) {
-					panic("TODO")
-				}
-				lowerDirs = append(lowerDirs, ociMount.Source)
-			case "overlay":
-				lowerDirs = append(lowerDirs, ExtractLowerDirs(ociMount.Options)...)
-			default:
-				panic("TODO")
-			}
-		}
-
-		options := []string{
-			fmt.Sprintf("lowerdir=%s", strings.Join(lowerDirs, ":")),
-		}
-
-		if upperDir != "" {
-			options = append(options,
-				fmt.Sprintf("upperdir=%s", upperDir),
-				fmt.Sprintf("workdir=%s", workDir),
-			)
-		}
-
-		newMount := oci.Mount{
-			Source: "",
-			Type: "overlay",
-			Destination: dest,
-			Options: options,
-		}
-
-		if dest == "/" {
-			rootMounts = append(rootMounts, newMount)
+	newMount := MergedMount{
+		Dest: m.Dest,
+	}
+	existingMount, alreadyExists := mounts[m.Dest]
+	if alreadyExists {
+		if existingMount.Type == "overlay" {
+			newMount.Sources = parseOverlay(existingMount.Options).LowerDirs
 		} else {
-			mounts = append(mounts, newMount)
+			return fmt.Errorf("cannot merge mount into %+v", existingMount)
+		}
+		// TODO should GenericMountOptions be merged? or just overwrite like they
+		// do now?
+	}
+
+	newMount.Sources = append(newMount.Sources, m.Sources...)
+
+	overlayDir := state.OverlayDir(m.Dest)
+	overlay := overlayOptions{
+		LowerDirs: newMount.Sources,
+		UpperDir:  overlayDir.UpperDir(),
+		WorkDir:   overlayDir.WorkDir(),
+	}
+	mounts[m.Dest] = oci.Mount{
+		Source:      "",
+		Destination: m.Dest,
+		Type:        "overlay",
+		Options:     append(overlay.OptionsSlice(), m.GenericMountOptions.Opts()...),
+	}
+	return nil
+}
+
+func AsMergedMount(m oci.Mount) (MergedMount, error) {
+	if m.Type == "overlay" {
+		return MergedMount{
+			Dest:                m.Destination,
+			Sources:             parseOverlay(m.Options).LowerDirs,
+			GenericMountOptions: ParseGenericMountOpts(m.Options),
+		}, nil
+	}
+	if HasBind(m.Options) {
+		return MergedMount{
+			Dest:                m.Destination,
+			Sources:             []string{m.Source},
+			GenericMountOptions: ParseGenericMountOpts(m.Options),
+		}, nil
+	}
+
+	// this includes rbind (which doesn't work because lowerdirs don't recurse)
+	return MergedMount{}, fmt.Errorf(
+		"cannot convert mount that isn't overlay or bind to MergedMount: %+v", m)
+}
+
+type BindMount struct {
+	Source    string
+	Dest      string
+	Recursive bool
+	Readonly  bool
+	GenericMountOptions
+}
+
+func (m BindMount) AddMount(
+	state ContainerState, mounts map[string]oci.Mount,
+) error {
+	opts := m.GenericMountOptions.Opts()
+	if m.Recursive {
+		opts = append(opts, "rbind")
+	} else {
+		opts = append(opts, "bind")
+	}
+	if m.Readonly {
+		opts = append(opts, "ro")
+	}
+	return OCIMount(oci.Mount{
+		Source:      m.Source,
+		Destination: m.Dest,
+		Type:        "none",
+		Options:     opts,
+	}).AddMount(state, mounts)
+}
+
+type TmpfsMount struct {
+	Dest     string
+	ByteSize uint
+	Mode     os.FileMode
+	GenericMountOptions
+}
+
+func (m TmpfsMount) AddMount(
+	state ContainerState, mounts map[string]oci.Mount,
+) error {
+	options := []string{
+		fmt.Sprintf("mode=%04o", m.Mode),
+	}
+	if m.ByteSize != 0 {
+		options = append(options,
+			fmt.Sprintf("size=%d", m.ByteSize),
+		)
+	}
+
+	return OCIMount(oci.Mount{
+		Source:      "tmpfs",
+		Destination: m.Dest,
+		Type:        "tmpfs",
+		Options:     append(options, m.GenericMountOptions.Opts()...),
+	}).AddMount(state, mounts)
+}
+
+type ProcfsMount struct{}
+
+func (m ProcfsMount) AddMount(
+	state ContainerState, mounts map[string]oci.Mount,
+) error {
+	return OCIMount(oci.Mount{
+		Source:      "proc",
+		Destination: "/proc",
+		Type:        "proc",
+		Options: GenericMountOptions{
+			Noexec: true,
+			Nosuid: true,
+			Nodev:  true,
+		}.Opts(),
+	}).AddMount(state, mounts)
+}
+
+type DevptsMount struct {
+	Dest     string
+	Ptmxmode os.FileMode
+	Mode     os.FileMode
+	Uid      uint32
+	Gid      uint32
+}
+
+func (m DevptsMount) AddMount(
+	state ContainerState, mounts map[string]oci.Mount,
+) error {
+	return OCIMount(oci.Mount{
+		Source:      "devpts",
+		Destination: "/dev/pts",
+		Type:        "devpts",
+		Options: append(GenericMountOptions{
+			Noexec: true,
+			Nosuid: true,
+		}.Opts(),
+			"newinstance",
+			fmt.Sprintf("ptmxmode=%04o", m.Ptmxmode),
+			fmt.Sprintf("mode=%04o", m.Mode),
+			fmt.Sprintf("uid=%d", m.Uid),
+			fmt.Sprintf("gid=%d", m.Gid),
+		),
+	}).AddMount(state, mounts)
+}
+
+type MqueueMount struct{}
+
+func (m MqueueMount) AddMount(
+	state ContainerState, mounts map[string]oci.Mount,
+) error {
+	return OCIMount(oci.Mount{
+		Source:      "mqueue",
+		Destination: "/dev/mqueue",
+		Type:        "mqueue",
+		Options: GenericMountOptions{
+			Noexec: true,
+			Nosuid: true,
+			Nodev:  true,
+		}.Opts(),
+	}).AddMount(state, mounts)
+}
+
+type OCIMount oci.Mount
+
+func (m OCIMount) AddMount(
+	state ContainerState, mounts map[string]oci.Mount,
+) error {
+	ociMount := oci.Mount(m)
+	existingMount, alreadyExists := mounts[m.Destination]
+	if alreadyExists {
+		return fmt.Errorf("cannot merge oci mount into %+v", existingMount)
+	}
+	mounts[m.Destination] = oci.Mount{
+		Source:      ociMount.Source,
+		Destination: ociMount.Destination,
+		Type:        ociMount.Type,
+		Options:     ociMount.Options,
+	}
+	return nil
+}
+
+func DefaultMounts() Mounts {
+	return Mounts([]Mountable{
+		ProcfsMount{},
+		TmpfsMount{
+			Dest: "/dev",
+			Mode: os.FileMode(0755),
+			GenericMountOptions: GenericMountOptions{
+				Nosuid:      true,
+				Strictatime: true,
+			},
+		},
+		DevptsMount{
+			Ptmxmode: os.FileMode(0666),
+			Mode:     os.FileMode(0620),
+		},
+		TmpfsMount{
+			Dest:     "/dev/shm",
+			Mode:     os.FileMode(01777),
+			ByteSize: uint(65536 * 1024),
+			GenericMountOptions: GenericMountOptions{
+				Noexec: true,
+				Nosuid: true,
+				Nodev:  true,
+			},
+		},
+		MqueueMount{},
+		BindMount{
+			Source:    "/sys",
+			Dest:      "/sys",
+			Recursive: true,
+			Readonly:  true,
+			GenericMountOptions: GenericMountOptions{
+				Noexec: true,
+				Nosuid: true,
+				Nodev:  true,
+			},
+		},
+		TmpfsMount{
+			Dest:     "/tmp",
+			Mode:     os.FileMode(01777),
+			ByteSize: uint(262144 * 1024),
+			GenericMountOptions: GenericMountOptions{
+				Noexec: true,
+				Nosuid: true,
+				Nodev:  true,
+			},
+		},
+		TmpfsMount{
+			Dest:     "/run",
+			Mode:     os.FileMode(01777),
+			ByteSize: uint(262144 * 1024),
+			GenericMountOptions: GenericMountOptions{
+				Noexec: true,
+				Nosuid: true,
+				Nodev:  true,
+			},
+		},
+	})
+}
+
+type WaitResult struct {
+	State *os.ProcessState
+	Err   error
+}
+
+func HasBind(mountOptions []string) bool {
+	return hasOpt("bind", mountOptions)
+}
+
+func HasRBind(mountOptions []string) bool {
+	return hasOpt("rbind", mountOptions)
+}
+
+func hasOpt(sought string, mountOptions []string) bool {
+	for _, opt := range mountOptions {
+		if opt == sought {
+			return true
 		}
 	}
-
-	var allMounts []oci.Mount
-	allMounts = append(allMounts, rootMounts...)
-	allMounts = append(allMounts, c.privateDirMounts()...)
-	allMounts = append(allMounts, mounts...)
-	allMounts = append(allMounts, c.dnsFileMounts()...)
-	return allMounts
+	return false
 }
 
-func (c ContainerDef) privateDirMounts() []oci.Mount {
-	return []oci.Mount{
-		{
-			Source:      "proc",
-			Destination: "/proc",
-			Type:        "proc",
-			Options: []string{
-				"noexec",
-				"nosuid",
-				"nodev",
-			},
-		},
-
-		{
-			Source:      "tmpfs",
-			Destination: "/dev",
-			Type:        "tmpfs",
-			Options: []string{
-				"nosuid",
-				"strictatime",
-				"mode=755",
-			},
-		},
-
-		{
-			Source:      "devpts",
-			Destination: "/dev/pts",
-			Type:        "devpts",
-			Options: []string{
-				"noexec",
-				"nosuid",
-				"newinstance",
-				"ptmxmode=0666",
-				"mode=0620",
-				"gid=0",
-			},
-		},
-
-		{
-			Source:      "none",
-			Destination: "/dev/shm",
-			Type:        "tmpfs",
-			Options: []string{
-				"noexec",
-				"nosuid",
-				"nodev",
-				"mode=1777",
-				"size=65536k",
-			},
-		},
-
-		{
-			Source:      "mqueue",
-			Destination: "/dev/mqueue",
-			Type:        "mqueue",
-			Options: []string{
-				"noexec",
-				"nosuid",
-				"nodev",
-			},
-		},
-
-		{
-			Source:      "/sys",
-			Destination: "/sys",
-			Type:        "none",
-			Options: []string{
-				"rbind",
-				"ro",
-				"noexec",
-				"nosuid",
-				"nodev",
-			},
-		},
-
-		{
-			Source:      "none",
-			Destination: "/tmp",
-			Type:        "tmpfs",
-			Options: []string{
-				"noexec",
-				"nosuid",
-				"nodev",
-				"mode=1777",
-				"size=262144k",
-			},
-		},
-
-		{
-			Source:      "none",
-			Destination: "/run",
-			Type:        "tmpfs",
-			Options: []string{
-				"noexec",
-				"nosuid",
-				"nodev",
-				"mode=1777",
-				"size=262144k",
-			},
-		},
+func ReplaceOption(m oci.Mount, oldOpt string, newOpt string) oci.Mount {
+	var newOpts []string
+	for _, o := range m.Options {
+		if o == oldOpt {
+			if newOpt != "" {
+				newOpts = append(newOpts, newOpt)
+			}
+		} else {
+			newOpts = append(newOpts, o)
+		}
+	}
+	return oci.Mount{
+		Source:      m.Source,
+		Destination: m.Destination,
+		Type:        m.Type,
+		Options:     newOpts,
 	}
 }
 
-func (c ContainerDef) dnsFileMounts() []oci.Mount {
-	return []oci.Mount{
-		{
-			Source:      c.EtcResolvPath,
-			Destination: "/etc/resolv.conf",
-			Type:        "none",
-			Options: []string{
-				"bind",
-				"ro",
-			},
-		},
-
-		{
-			Source:      c.EtcHostsPath,
-			Destination: "/etc/hosts",
-			Type:        "none",
-			Options: []string{
-				"bind",
-				"ro",
-			},
-		},
-	}
-}
-
-func ExtractLowerDirs(options []string) []string {
+func extractLowerDirs(options []string) []string {
 	opts := make(map[string]string)
 	for _, opt := range options {
 		kv := strings.SplitN(opt, "=", 2)
@@ -807,16 +997,73 @@ func ExtractLowerDirs(options []string) []string {
 	return strings.Split(lowerDirs, ":")
 }
 
-func isBind(m oci.Mount) bool {
-	for _, opt := range m.Options {
-		if opt == "bind" || opt == "rbind" {
-			return true
-		}
-	}
-	return false
+type overlayOptions struct {
+	LowerDirs []string
+	UpperDir  string
+	WorkDir   string
+	Extra     []string
 }
 
-type WaitResult struct {
-	State *os.ProcessState
-	Err   error
+func (o overlayOptions) Options() string {
+	return strings.Join(o.OptionsSlice(), ",")
+}
+
+func (o overlayOptions) OptionsSlice() []string {
+	options := append(o.Extra,
+		fmt.Sprintf("lowerdir=%s", strings.Join(o.LowerDirs, ":")))
+	if o.UpperDir != "" {
+		options = append(options,
+			fmt.Sprintf("upperdir=%s", o.UpperDir),
+			fmt.Sprintf("workdir=%s", o.WorkDir),
+		)
+	}
+	return options
+}
+
+func parseOverlay(options []string) overlayOptions {
+	overlay := overlayOptions{}
+
+	for _, opt := range options {
+		kv := strings.SplitN(opt, "=", 2)
+		if len(kv) < 2 {
+			overlay.Extra = append(overlay.Extra, opt)
+			continue
+		}
+
+		key, value := kv[0], kv[1]
+		switch key {
+		case "lowerdir":
+			overlay.LowerDirs = strings.Split(value, ":")
+		case "upperdir":
+			overlay.UpperDir = value
+		case "workdir":
+			overlay.WorkDir = value
+		default:
+			overlay.Extra = append(overlay.Extra, opt)
+		}
+	}
+
+	return overlay
+}
+
+func sortMounts(mounts map[string]oci.Mount) []oci.Mount {
+	// ensure subdirs appear after parent dirs (thankfully lexicographic sort works)
+	var sorted []oci.Mount
+	for _, m := range mounts {
+		sorted = append(sorted, m)
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return filepath.Clean(sorted[i].Destination) <
+			filepath.Clean(sorted[j].Destination)
+	})
+	return sorted
+}
+
+func isUnderDir(path string, baseDir string) bool {
+	path = filepath.Clean(path)
+	baseDir = filepath.Clean(baseDir)
+	if baseDir == "/" && path != "/" {
+		return true
+	}
+	return strings.HasPrefix(path, baseDir+"/")
 }

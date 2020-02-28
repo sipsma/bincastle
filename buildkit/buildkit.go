@@ -57,8 +57,8 @@ import (
 	imageSpec "github.com/opencontainers/image-spec/specs-go/v1"
 	ociSpec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
-	"github.com/sipsma/bincastle/util"
 	"github.com/sipsma/bincastle/ctr"
+	"github.com/sipsma/bincastle/util"
 	"go.etcd.io/bbolt"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -129,21 +129,21 @@ func Build(
 	}
 
 	/* TODO investigate why using buildkit caches causes the CPU to
-       get pegged at 100% and do nothing seemingly indefinitely
-		cacheExport = []client.CacheOptionsEntry{{
-			Type: "registry",
-			Attrs: map[string]string{
-				"ref": "localhost:5000/buildcache",
-				"mode": "max",
-			},
-		}}
+	       get pegged at 100% and do nothing seemingly indefinitely
+			cacheExport = []client.CacheOptionsEntry{{
+				Type: "registry",
+				Attrs: map[string]string{
+					"ref": "localhost:5000/buildcache",
+					"mode": "max",
+				},
+			}}
 
-		cacheImport = []client.CacheOptionsEntry{{
-			Type: "registry",
-			Attrs: map[string]string{
-				"ref": "localhost:5000/buildcache",
-			},
-		}}
+			cacheImport = []client.CacheOptionsEntry{{
+				Type: "registry",
+				Attrs: map[string]string{
+					"ref": "localhost:5000/buildcache",
+				},
+			}}
 	*/
 
 	solveOpt := client.SolveOpt{
@@ -492,16 +492,8 @@ func (e *runcExecutor) hostsPath() string {
 	return filepath.Join(e.stateRootDir, "hosts")
 }
 
-func (e *runcExecutor) mountsDir() string {
-	return filepath.Join(e.stateRootDir, "mounts")
-}
-
-func (e *runcExecutor) runcStateDir() string {
-	return filepath.Join(e.stateRootDir, "runcState")
-}
-
-func (e *runcExecutor) overlaysDir() string {
-	return filepath.Join(e.stateRootDir, "overlays")
+func (e *runcExecutor) execsDir() string {
+	return filepath.Join(e.stateRootDir, "execs")
 }
 
 func newRuncExecutor(
@@ -569,17 +561,18 @@ func (e *runcExecutor) Exec(
 	}
 	releaseFuncs = append([]func() error{rootSnapshotCleanup}, releaseFuncs...)
 	// TODO safe to ignore multiple mounts?
-	rootMountDir := rootMounts[0].Source
+	finalUpperDir := rootMounts[0].Source
 
 	mountsByDest := make(map[string][]executor.Mount)
 	overlayMounts := make(map[string]bool)
 	discardChanges := make(map[string]bool)
 	for _, execMount := range execMounts {
 		// TODO the implicit mix of an AddMount w/ one of the overlays that this
-		// enables is fragile and surprising, need a better way
+		// enables is fragile and surprising, need to do validation
 		ld, err := util.LowerDirFrom(execMount.Dest)
 		if err != nil {
-			mountsByDest[execMount.Dest] = append(mountsByDest[execMount.Dest], execMount)
+			mountsByDest[execMount.Dest] = append(mountsByDest[execMount.Dest],
+				execMount)
 			continue
 		}
 
@@ -607,7 +600,7 @@ func (e *runcExecutor) Exec(
 		mountsByDest[dest] = mountList
 	}
 
-	ctrMounts := make(map[string]ctr.MountPoint)
+	ctrMounts := ctr.Mounts(nil)
 	for dest, mountList := range mountsByDest {
 		for _, execMount := range mountList {
 			snapshotMountable, err := execMount.Src.Mount(ctx, execMount.Readonly)
@@ -619,142 +612,131 @@ func (e *runcExecutor) Exec(
 				return multierror.Append(err, release()).ErrorOrNil()
 			}
 			releaseFuncs = append([]func() error{snapshotCleanup}, releaseFuncs...)
-			// TODO safe to ignore multiple mounts?
-			cacheMount := cacheMounts[0]
 
-			bindOptions := []string{"bind"}
-			if execMount.Readonly {
-				bindOptions = append(bindOptions, "ro")
-			} else {
-				bindOptions = append(bindOptions, "rw")
-			}
-
-			fmt.Println(cacheMount)
-
-			switch cacheMount.Type {
-			case "overlay":
-				for _, ldSource := range ctr.ExtractLowerDirs(cacheMount.Options) {
-					ctrMounts[dest] = ctr.MountPoint{
-						Lowers: append(ctrMounts[dest].Lowers, ociSpec.Mount{
-							Destination: dest,
-							Type:        "none",
-							Source:      filepath.Join(ldSource, execMount.Selector),
-							Options:     bindOptions,
-						}),
+			for _, cacheMount := range cacheMounts {
+				newMount := ociSpec.Mount{
+					Source:      filepath.Join(
+						cacheMount.Source, execMount.Selector),
+					Destination: dest,
+					Type:        cacheMount.Type,
+					Options:     cacheMount.Options,
+				}
+				var mntable ctr.Mountable
+				if overlayMounts[dest] {
+					// turn rbinds to binds as rbinds can't be
+					// used for overlay lowerdirs
+					mntable, err = ctr.AsMergedMount(
+						ctr.ReplaceOption(newMount, "rbind", "bind"))
+					if err != nil {
+						return multierror.Append(err, release()).ErrorOrNil()
 					}
+				} else {
+					mntable = ctr.OCIMount(newMount)
 				}
-			case "bind":
-				ctrMounts[dest] = ctr.MountPoint{
-					Lowers: append(ctrMounts[dest].Lowers, ociSpec.Mount{
-						Destination: dest,
-						Type:        "none",
-						Source:      filepath.Join(cacheMount.Source, execMount.Selector),
-						Options:     bindOptions,
-					}),
-				}
-			default:
-				panic("TODO")
+				ctrMounts = ctrMounts.With(mntable)
 			}
 		}
-		fmt.Println("")
 	}
 
 	fmt.Println(ctrMounts)
 
 	execID := identity.NewID()
+	ctrState := ctr.ContainerStateRoot(e.execsDir()).ContainerState(execID)
 
-	execDir := filepath.Join(e.overlaysDir(), execID)
-	err = os.MkdirAll(execDir, 0700)
+	container, err := ctrState.Start(ctr.ContainerDef{
+		ContainerProc: ctr.ContainerProc{
+			Args:         meta.Args,
+			Env:          meta.Env,
+			WorkingDir:   meta.Cwd,
+			Uid:          0,
+			Gid:          0,
+			Capabilities: &ctr.AllCaps, // TODO don't hardcode
+		},
+		Hostname: "bincastle",
+		Mounts:   ctrMounts.With(ctr.DefaultMounts()...).With(
+			ctr.BindMount{
+				Dest:     "/etc/resolv.conf",
+				Source:   e.resolvConfPath(),
+				Readonly: true,
+			},
+			ctr.BindMount{
+				Dest:     "/etc/hosts",
+				Source:   e.hostsPath(),
+				Readonly: true,
+			},
+		),
+	})
 	if err != nil {
 		return multierror.Append(err, release()).ErrorOrNil()
 	}
 	releaseFuncs = append([]func() error{func() error {
-		return os.RemoveAll(execDir)
+		// TODO use a time out ctx. Don't want to ues existing ctx
+		// in case it has been canceled
+		return container.Destroy(context.Background())
 	}}, releaseFuncs...)
 
-	var i int
-	for dest, overlay := range ctrMounts {
-		i += 1
-
-		mountsDir := filepath.Join(execDir, strconv.Itoa(i))
-
-		var upperDir string
-		if len(overlay.Lowers) > 1 || overlayMounts[dest] {
-			upperDir = filepath.Join(mountsDir, "upper")
-			if dest == "/" {
-				upperDir = rootMountDir
-			}
-			err = os.MkdirAll(upperDir, 0700)
-			if err != nil {
-				return multierror.Append(err, release()).ErrorOrNil()
-			}
-		}
-
-		workDir := filepath.Join(mountsDir, "work")
-		err = os.MkdirAll(workDir, 0700)
-		if err != nil {
-			return multierror.Append(err, release()).ErrorOrNil()
-		}
-
-		ctrMounts[dest] = ctr.MountPoint{
-			UpperDir: upperDir,
-			WorkDir:  workDir,
-			Lowers:   overlay.Lowers,
-		}
-	}
-
-	waitCh, cleanupCtr, err := ctr.ContainerDef{
-		Args:          meta.Args,
-		Env:           meta.Env,
-		WorkingDir:    meta.Cwd,
-		Terminal:      meta.Tty,
-		Uid:           0,
-		Gid:           0,
-		Capabilities:  &ctr.AllCaps, // TODO don't hardcode
-		Mounts:        ctrMounts,
-		EtcResolvPath: e.resolvConfPath(),
-		EtcHostsPath:  e.hostsPath(),
-		Hostname:      "bincastle",
-		Stdin:         stdin,
-		Stdout:        stdout,
-		Stderr:        stderr,
-	}.Run(execID, e.runcStateDir())
-	if err != nil {
+	go container.Attach(ctx, stdin, stdout)
+	waitResult := container.Wait(ctx)
+	if waitResult.Err != nil {
+		err = fmt.Errorf("exec returned non-zero exit code: %w", waitResult.Err)
 		return multierror.Append(err, release()).ErrorOrNil()
 	}
-	releaseFuncs = append([]func() error{cleanupCtr}, releaseFuncs...)
 
-	var execErr error
-	select {
-	case <-ctx.Done():
-		execErr = ctx.Err()
-	case waitResult := <-waitCh:
-		execErr = waitResult.Err
-	}
-	if execErr != nil {
-		return multierror.Append(execErr, release()).ErrorOrNil()
-	}
-
-	rootUpperDir := ctrMounts["/"].UpperDir
-	for dest, overlay := range ctrMounts {
-		if dest == "/" || overlay.UpperDir == ""  || discardChanges[dest] {
+	for dest, diffDir := range container.DiffDirs() {
+		if discardChanges[dest] {
 			continue
 		}
 
-		rootDest := filepath.Join(rootUpperDir, dest)
+		rootDest := filepath.Join(finalUpperDir, dest)
 		// TODO how to ensure the right permissions
 		err = os.MkdirAll(rootDest, 0700)
 		if err != nil {
 			return multierror.Append(err, release()).ErrorOrNil()
 		}
 
-		// TODO hardlink would be more efficient when possible
-		err = fs.CopyDir(rootDest, overlay.UpperDir)
+		err = fs.CopyDir(rootDest, diffDir)
+		if err != nil {
+			return multierror.Append(err, release()).ErrorOrNil()
+		}
+
+		// TODO there appears to be bug in the CopyDir function where
+		// whiteouts get copied as regular empty files. I was able
+		// to fix that by using the filemode as returned by the actual
+		// stat (instead of go's FileMode), but then discovered there
+		// was yet another issue where char devices can't be made in
+		// unpriv user namespaces...
+		// Hardlink works though! Not really concerned about
+		// crossing filesystems at this point, everything is
+		// expected to use a single underlying fs.
+		// Should fix the issue upstream in continuity either way though
+		// if it turns out to be real.
+		err = filepath.Walk(diffDir, func(
+			path string, info os.FileInfo, err error,
+		) error {
+			if err != nil {
+				return err
+			}
+			if (info.Mode() & os.ModeCharDevice) == os.ModeCharDevice {
+				relPath, err := filepath.Rel(diffDir, path)
+				if err != nil {
+					return err
+				}
+				copyPath := filepath.Join(rootDest, relPath)
+				err = os.RemoveAll(copyPath)
+				if err != nil {
+					return err
+				}
+				err = os.Link(path, copyPath)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 		if err != nil {
 			return multierror.Append(err, release()).ErrorOrNil()
 		}
 	}
 
-	return multierror.Append(err, release()).ErrorOrNil()
+	return release()
 }
-

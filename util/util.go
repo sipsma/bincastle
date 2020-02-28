@@ -64,10 +64,9 @@ func LowerDirFrom(str string) (LowerDir, error) {
 	}
 	ld.Index = index
 
+	ld.Dest = "/"
 	if len(split) == 4 {
-		ld.Dest = split[3]
-	} else {
-		ld.Dest = "/"
+		ld.Dest = filepath.Join(ld.Dest, split[3])
 	}
 
 	return ld, nil
