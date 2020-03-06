@@ -33,8 +33,6 @@ const (
 
 	// internal
 	internalRunArg    = "internalRun"
-	internalExportArg = "internalExport"
-	internalAttachArg = "internalAttach"
 )
 
 var (
