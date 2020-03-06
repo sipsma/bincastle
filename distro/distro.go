@@ -76,7 +76,9 @@ import (
 	"github.com/sipsma/bincastle/distro/builds/utillinuxbuild"
 	"github.com/sipsma/bincastle/distro/builds/xzbuild"
 	"github.com/sipsma/bincastle/distro/builds/zlibbuild"
+	"github.com/sipsma/bincastle/distro/builds/usersbuild"
 	"github.com/sipsma/bincastle/distro/pkgs/acl"
+	"github.com/sipsma/bincastle/distro/pkgs/users"
 	"github.com/sipsma/bincastle/distro/pkgs/attr"
 	"github.com/sipsma/bincastle/distro/pkgs/autoconf"
 	"github.com/sipsma/bincastle/distro/pkgs/automake"
@@ -1219,6 +1221,15 @@ func (d distro) Golang() PkgBuild {
 }
 */
 
+func (d distro) Users() PkgBuild {
+	return usersbuild.SingleUser(d,
+		// TODO make this customizable by other consumers via a field in distro
+		"sipsma",
+		"/home/sipsma",
+		"/bin/bash",
+	)
+}
+
 func Bootstrap(bootstrapGraph Graph) Graph {
 	defaultBuildOpts := []llb.RunOption{
 		// TODO should this really be hardcoded?
@@ -1327,11 +1338,6 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			`ln -sv /tools/lib/libstdc++.{a,so{,.6}} /usr/lib`,
 			`ln -sv bash /bin/sh`,
 			`ln -sv /proc/self/mounts /etc/mtab`,
-			// TODO don't hardcode and also move to a pkg that will
-			// be included in the final system
-			`mkdir -p /home/sipsma`,
-			`echo 'sipsma:x:0:0:sipsma:/home/sipsma:/bin/bash' > /etc/passwd`,
-			`echo 'sipsma:x:0:' > /etc/group`,
 		),
 	).With(Deps(unpatchedTmp), Name("base-system"))
 
@@ -1424,6 +1430,7 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			cacerts.Pkg(d),
 			curl.Pkg(d),
 			git.Pkg(d),
+			users.Pkg(d),
 		)
 	}(distro{
 		Pkger: DefaultPkger(append(defaultBuildOpts,
@@ -1431,8 +1438,8 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			patchedTmp,
 			AtRuntime(Deps(patchedTmp)),
 		)...),
-		stage3Distro: stage3,
-		distroSources:  sources,
+		stage3Distro:  stage3,
+		distroSources: sources,
 	})
 
 	return TrimGraphs(distroGraph, patchedTmp, baseSystem)

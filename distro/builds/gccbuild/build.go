@@ -54,8 +54,8 @@ func Default(d interface {
 			`make`,
 			`make install`,
 			`rm -rf /usr/lib/gcc/$(gcc -dumpmachine)/9.2.0/include-fixed/bits/`,
-			// TODO don't hardcode...
-			`chown -v -R sipsma:sipsma /usr/lib/gcc/*linux-gnu/9.2.0/include{,-fixed}`,
+			// TODO don't hardcode uid/gid?
+			`chown -v -R 0:0 /usr/lib/gcc/*linux-gnu/9.2.0/include{,-fixed}`,
 			`ln -sv ../usr/bin/cpp /lib`,
 			`ln -sv gcc /usr/bin/cc`,
 			`install -v -dm755 /usr/lib/bfd-plugins`,
