@@ -1230,6 +1230,20 @@ func (d distro) Users() PkgBuild {
 	)
 }
 
+// TODO hate this name...
+func (d distro) MiscFiles() Pkg {
+	return d.Exec(coreutils.Pkg(d), bash.Pkg(d), Shell(
+		`ln -sv /run /var/run`,
+		`mkdir -pv /var/{opt,cache,lib/{color,misc,locate},local}`,
+		// TODO have to first remove the existing symlinks because
+		// they are also provided in the bootstrap, which is later trimmed.
+		// This is super ugly, you need to find a better way to de-dupe this
+		// with the bootstrap
+		`rm -f /bin/sh && ln -sv bash /bin/sh`,
+		`rm -f /etc/mtab && ln -sv /proc/self/mounts /etc/mtab`,
+	)).With(Deps(bash.Pkg(d)))
+}
+
 func Bootstrap(bootstrapGraph Graph) Graph {
 	defaultBuildOpts := []llb.RunOption{
 		// TODO should this really be hardcoded?
@@ -1431,6 +1445,7 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			curl.Pkg(d),
 			git.Pkg(d),
 			users.Pkg(d),
+			d.MiscFiles(),
 		)
 	}(distro{
 		Pkger: DefaultPkger(append(defaultBuildOpts,
