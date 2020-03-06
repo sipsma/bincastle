@@ -269,9 +269,6 @@ func graphToCtr(g graph.Graph, ctrState ctr.ContainerState) (ctr.Container, erro
 			panic("TODO")
 		}
 		// cleanupMnt just decrements buildkit's ref counter.
-		// TODO it's messy, but right now it's fine to run this at
-		// the end of the function because we are going to exec
-		// to the final container creator process (due to other issues)
 		defer cleanupMnt()
 
 		pkgDest := graph.MountDirOf(pkg)
