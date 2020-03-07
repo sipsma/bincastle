@@ -42,7 +42,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("golang"),
-		VersionOf(golang.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

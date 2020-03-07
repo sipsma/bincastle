@@ -57,7 +57,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("autoconf"),
-		VersionOf(autoconf.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			m4.Pkg(d),

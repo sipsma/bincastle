@@ -51,7 +51,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("openssl"),
-		VersionOf(openssl.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

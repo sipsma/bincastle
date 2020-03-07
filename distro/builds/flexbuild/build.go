@@ -51,7 +51,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("flex"),
-		VersionOf(flex.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

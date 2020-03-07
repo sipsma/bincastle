@@ -45,7 +45,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("patch"),
-		VersionOf(patch.SrcPkg(d)),
 		Deps(libc.Pkg(d), attr.Pkg(d)),
 	).With(opts...))
 }

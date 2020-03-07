@@ -45,7 +45,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("intltool"),
-		VersionOf(intltool.SrcPkg(d)),
 		Deps(libc.Pkg(d), perl5.XMLParserPkg(d)),
 	).With(opts...))
 }

@@ -45,7 +45,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("make"),
-		VersionOf(make.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

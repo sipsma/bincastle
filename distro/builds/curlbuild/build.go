@@ -60,7 +60,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("curl"),
-		VersionOf(curl.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			openssl.Pkg(d),

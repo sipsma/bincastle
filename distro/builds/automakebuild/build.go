@@ -52,7 +52,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("automake"),
-		VersionOf(automake.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			m4.Pkg(d),

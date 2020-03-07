@@ -50,7 +50,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("xz"),
-		VersionOf(xz.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

@@ -49,7 +49,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("tar"),
-		VersionOf(tar.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			attr.Pkg(d),

@@ -51,7 +51,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("procps"),
-		VersionOf(procps.SrcPkg(d)),
 		Deps(libc.Pkg(d), ncurses.Pkg(d)),
 	).With(opts...))
 }

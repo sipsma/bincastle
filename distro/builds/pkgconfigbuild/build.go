@@ -45,7 +45,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("pkgconfig"),
-		VersionOf(pkgconfig.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

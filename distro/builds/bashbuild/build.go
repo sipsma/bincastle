@@ -52,7 +52,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("bash"),
-		VersionOf(bash.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			readline.Pkg(d),

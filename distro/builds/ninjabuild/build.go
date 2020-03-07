@@ -40,7 +40,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("ninja"),
-		VersionOf(ninja.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			gcc.Pkg(d),

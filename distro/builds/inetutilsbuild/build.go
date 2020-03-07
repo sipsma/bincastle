@@ -58,7 +58,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("inetutils"),
-		VersionOf(inetutils.SrcPkg(d)),
 		Deps(libc.Pkg(d), readline.Pkg(d), ncurses.Pkg(d)),
 	).With(opts...))
 }

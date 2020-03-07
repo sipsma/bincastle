@@ -61,7 +61,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("ncurses"),
-		VersionOf(ncurses.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

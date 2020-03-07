@@ -42,7 +42,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("libcap"),
-		VersionOf(libcap.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

@@ -41,7 +41,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("mpfr"),
-		VersionOf(mpfr.SrcPkg(d)),
 		Deps(libc.Pkg(d), gmp.Pkg(d)),
 	).With(opts...))
 }

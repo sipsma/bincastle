@@ -42,7 +42,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("readline"),
-		VersionOf(readline.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

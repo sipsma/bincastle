@@ -20,6 +20,5 @@ func Default(d interface {
 		),
 	).With(
 		Name("iana-etc"),
-		VersionOf(ianaetc.SrcPkg(d)),
 	).With(opts...))
 }

@@ -54,7 +54,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("acl"),
-		VersionOf(acl.SrcPkg(d)),
 		Deps(libc.Pkg(d), attr.Pkg(d)),
 	).With(opts...))
 }

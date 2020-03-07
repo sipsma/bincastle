@@ -63,7 +63,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("p11kit"),
-		VersionOf(p11kit.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			libffi.Pkg(d),

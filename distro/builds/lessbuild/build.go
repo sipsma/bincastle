@@ -46,7 +46,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("less"),
-		VersionOf(less.SrcPkg(d)),
 		Deps(libc.Pkg(d), ncurses.Pkg(d)),
 	).With(opts...))
 }

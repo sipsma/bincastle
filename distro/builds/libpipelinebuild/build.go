@@ -45,7 +45,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("libpipeline"),
-		VersionOf(libpipeline.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

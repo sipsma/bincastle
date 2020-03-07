@@ -78,6 +78,5 @@ func DefaultGlibc(d interface {
 		),
 	).With(
 		Name("libc"),
-		VersionOf(libc.SrcPkg(d)),
 	).With(opts...))
 }

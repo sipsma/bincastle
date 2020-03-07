@@ -53,7 +53,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("findutils"),
-		VersionOf(findutils.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

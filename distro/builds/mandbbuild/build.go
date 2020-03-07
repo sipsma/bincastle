@@ -66,7 +66,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("mandb"),
-		VersionOf(mandb.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			zlib.Pkg(d),

@@ -57,7 +57,6 @@ func Gawk(d interface {
 		),
 	).With(
 		Name("gawk"),
-		VersionOf(awk.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			gmp.Pkg(d),

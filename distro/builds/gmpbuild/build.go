@@ -39,7 +39,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("gmp"),
-		VersionOf(gmp.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

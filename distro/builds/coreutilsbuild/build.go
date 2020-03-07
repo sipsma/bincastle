@@ -68,7 +68,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("coreutils"),
-		VersionOf(coreutils.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			acl.Pkg(d),

@@ -36,7 +36,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("m4"),
-		VersionOf(m4.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

@@ -43,7 +43,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("groff"),
-		VersionOf(groff.SrcPkg(d)),
 		Deps(libc.Pkg(d), gcc.Pkg(d)),
 	).With(opts...))
 }

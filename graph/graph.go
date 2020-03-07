@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"sort"
-	"strconv"
 
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/solver/llbsolver"
@@ -129,8 +128,8 @@ func (pkgr pkger) Exec(runOpts ...llb.RunOption) Pkg {
 		for i, depPkg := range Tsort(BuildDepsOf(basePkg)) {
 			runOpts = append(runOpts, llb.AddMount(
 				util.LowerDir{
-					Index: i,
-					Dest: MountDirOf(depPkg),
+					Index:          i,
+					Dest:           MountDirOf(depPkg),
 					DiscardChanges: DiscardChangesOf(depPkg),
 				}.String(),
 				depPkg.State(),
@@ -238,11 +237,13 @@ func ID(p Pkg) string {
 }
 
 var skipPkg = errors.New("skipping recursing to deps during walk")
+
 func SkipPkg() error {
 	return skipPkg
 }
 
 var stopWalk = errors.New("stopping walk")
+
 func StopWalk() error {
 	return stopWalk
 }
@@ -279,7 +280,7 @@ func Walk(g Graph, f func(Pkg) error) error {
 
 func UniqueWalk(g Graph, f func(Pkg) error) error {
 	visited := make(map[string]bool)
-	return Walk(g, func (p Pkg) error {
+	return Walk(g, func(p Pkg) error {
 		if visited[p.ID()] {
 			return SkipPkg()
 		}
@@ -648,7 +649,7 @@ func TrimGraphs(g Graph, trimGraphs ...Graph) Graph {
 			})
 		}
 
-		return Transform(g, OptFunc(func (p Pkg) Pkg {
+		return Transform(g, OptFunc(func(p Pkg) Pkg {
 			if trimIDs[p.ID()] {
 				return EmptyPkg()
 			}
@@ -691,6 +692,7 @@ func BuildDeps(graphs ...Graph) Opt {
 // TODO what to do if some mounts at a point want changes discarded
 // and some don't
 type discardChangesKey struct{}
+
 func DiscardChanges() Opt {
 	return OptFunc(func(p Pkg) Pkg {
 		return p.With(PkgValue(discardChangesKey{}, true))
@@ -749,106 +751,6 @@ type Name string
 
 func (n Name) ApplyToPkg(p Pkg) Pkg {
 	return PkgValue(nameKey{}, n).ApplyToPkg(p)
-}
-
-type Version string
-
-const NoVersion = Version("")
-
-type versionKey struct{}
-
-func VersionOf(p Pkg) Version {
-	v, ok := PkgValueOf(p, versionKey{}).(Version)
-	if !ok {
-		return NoVersion
-	}
-	return v
-}
-
-func (v Version) ApplyToPkg(p Pkg) Pkg {
-	if v == NoVersion {
-		return p
-	}
-
-	return PkgValue(versionKey{}, v).ApplyToPkg(p)
-}
-
-type versions map[Version]Pkg
-
-type versionsKey struct{}
-
-func AltVersions(pkgBuilds ...PkgBuild) Opt {
-	return OptFunc(func(p Pkg) Pkg {
-		vs := mkCopy(versionsOf(p))
-		for _, pkgBuild := range pkgBuilds {
-			p := pkgBuild.pkg
-			v := VersionOf(p)
-			if v == NoVersion {
-				continue
-			}
-			if existingP, ok := vs[v]; ok {
-				if existingP.ID() == p.ID() {
-					continue
-				}
-				panic("TODO duplicate versions without matching states")
-			}
-			vs[v] = p
-		}
-		return p.With(vs)
-	})
-}
-
-func mkCopy(vs versions) versions {
-	newVs := versions(make(map[Version]Pkg))
-	for v, p := range vs {
-		newVs[v] = p
-	}
-	return newVs
-}
-
-func versionsOf(p Pkg) versions {
-	vs, ok := PkgValueOf(p, versionsKey{}).(versions)
-	if !ok {
-		return versions(map[Version]Pkg{})
-	}
-	return vs
-}
-
-func (vs versions) ApplyToPkg(p Pkg) Pkg {
-	return PkgValue(versionsKey{}, vs).ApplyToPkg(p)
-}
-
-func SwapToVersion(v Version) Opt {
-	return OptFunc(func(p Pkg) Pkg {
-		curVersion := VersionOf(p)
-		if v == curVersion {
-			return p
-		}
-
-		vs := mkCopy(versionsOf(p))
-		newPkg, ok := vs[v]
-		if !ok {
-			panic("TODO")
-		}
-		delete(vs, v)
-
-		if curVersion != NoVersion {
-			vs[curVersion] = p
-		}
-
-		return newPkg.With(v, vs)
-	})
-}
-
-func V(fields ...int) Version {
-	if len(fields) == 0 {
-		panic("TODO")
-	}
-	vstr := "v" + strconv.Itoa(fields[0])
-	for _, field := range fields[1:] {
-		vstr += "." + strconv.Itoa(field)
-	}
-	return Version(vstr)
 }
 
 // TODO this is just a hack to enable parallel

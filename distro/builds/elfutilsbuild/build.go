@@ -52,7 +52,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("elfutils"),
-		VersionOf(elfutils.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			zlib.Pkg(d),

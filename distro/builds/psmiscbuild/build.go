@@ -47,7 +47,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("psmisc"),
-		VersionOf(psmisc.SrcPkg(d)),
 		Deps(libc.Pkg(d), ncurses.Pkg(d)),
 	).With(opts...))
 }

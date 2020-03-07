@@ -62,7 +62,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("e2fsprogs"),
-		VersionOf(e2fsprogs.SrcPkg(d)),
 		Deps(libc.Pkg(d), utillinux.Pkg(d)),
 	).With(opts...))
 }

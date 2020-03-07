@@ -30,7 +30,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("cacerts"),
-		VersionOf(cacerts.SrcPkg(d)),
 		Deps(
 			p11kit.Pkg(d),
 			openssl.Pkg(d),

@@ -24,6 +24,5 @@ func DefaultHeaders(d interface {
 		),
 	).With(
 		Name("linux-headers"),
-		VersionOf(linux.SrcPkg(d)),
 	).With(opts...))
 }

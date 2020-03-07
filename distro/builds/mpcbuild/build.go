@@ -43,7 +43,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("mpc"),
-		VersionOf(mpc.SrcPkg(d)),
 		Deps(libc.Pkg(d), gmp.Pkg(d), mpfr.Pkg(d)),
 	).With(opts...))
 }

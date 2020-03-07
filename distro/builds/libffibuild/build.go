@@ -48,7 +48,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("libffi"),
-		VersionOf(libffi.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

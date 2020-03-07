@@ -50,7 +50,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("gdbm"),
-		VersionOf(gdbm.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			readline.Pkg(d),

@@ -52,7 +52,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("git"),
-		VersionOf(git.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			zlib.Pkg(d),

@@ -68,7 +68,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("utillinux"),
-		VersionOf(utillinux.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			ncurses.Pkg(d),

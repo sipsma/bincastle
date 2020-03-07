@@ -39,7 +39,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("meson"),
-		VersionOf(meson.SrcPkg(d)),
 		Deps(libc.Pkg(d), python3.Pkg(d)),
 	).With(opts...))
 }

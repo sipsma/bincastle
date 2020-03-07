@@ -44,7 +44,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("bzip2"),
-		VersionOf(bzip2.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

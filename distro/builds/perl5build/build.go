@@ -60,7 +60,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("perl5"),
-		VersionOf(perl5.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			gdbm.Pkg(d),
@@ -99,7 +98,6 @@ func DefaultXMLParser(d interface {
 		),
 	).With(
 		Name("perl5-xmlparser"),
-		VersionOf(perl5.XMLParserSrcPkg(d)),
 		Deps(libc.Pkg(d), perl5.Pkg(d), expat.Pkg(d)),
 	).With(opts...))
 }

@@ -76,7 +76,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("python3"),
-		VersionOf(python3.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			zlib.Pkg(d),

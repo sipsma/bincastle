@@ -54,7 +54,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("gettext"),
-		VersionOf(gettext.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			gcc.Pkg(d),

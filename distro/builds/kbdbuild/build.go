@@ -51,7 +51,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("kbd"),
-		VersionOf(kbd.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

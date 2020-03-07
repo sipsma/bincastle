@@ -49,7 +49,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("gzip"),
-		VersionOf(gzip.SrcPkg(d)),
 		Deps(libc.Pkg(d), bash.Pkg(d)),
 	).With(opts...))
 }

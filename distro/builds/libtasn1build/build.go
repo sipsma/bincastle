@@ -49,7 +49,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("libtasn1"),
-		VersionOf(libtasn1.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

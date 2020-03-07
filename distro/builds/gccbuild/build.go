@@ -65,7 +65,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("gcc"),
-		VersionOf(gcc.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			mpc.Pkg(d),

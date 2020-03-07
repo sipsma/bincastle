@@ -43,7 +43,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("binutils"),
-		VersionOf(binutils.SrcPkg(d)),
 		Deps(libc.Pkg(d), zlib.Pkg(d)),
 	).With(opts...))
 }

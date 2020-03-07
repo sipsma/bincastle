@@ -45,7 +45,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("diffutils"),
-		VersionOf(diffutils.SrcPkg(d)),
 		Deps(libc.Pkg(d), coreutils.Pkg(d)),
 	).With(opts...))
 }

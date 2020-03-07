@@ -42,7 +42,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("libtool"),
-		VersionOf(libtool.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

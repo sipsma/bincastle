@@ -43,7 +43,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("grep"),
-		VersionOf(grep.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }

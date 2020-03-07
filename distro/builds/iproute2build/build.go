@@ -53,7 +53,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("iproute2"),
-		VersionOf(iproute2.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			zlib.Pkg(d),

@@ -19,6 +19,5 @@ func Default(d interface {
 		),
 	).With(
 		Name("manpages"),
-		VersionOf(manpages.SrcPkg(d)),
 	).With(opts...))
 }

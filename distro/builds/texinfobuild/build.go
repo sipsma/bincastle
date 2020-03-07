@@ -46,7 +46,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("texinfo"),
-		VersionOf(texinfo.SrcPkg(d)),
 		Deps(libc.Pkg(d), ncurses.Pkg(d)),
 	).With(opts...))
 }

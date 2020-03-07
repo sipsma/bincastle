@@ -35,7 +35,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("file"),
-		VersionOf(file.SrcPkg(d)),
 		Deps(libc.Pkg(d), zlib.Pkg(d)),
 	).With(opts...))
 }

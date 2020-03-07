@@ -174,7 +174,6 @@ func (d stage1Distro) Binutils() PkgBuild {
 		),
 	).With(
 		Name("binutils-stage1"),
-		VersionOf(binutils.SrcPkg(d)),
 	))
 }
 
@@ -239,7 +238,6 @@ func (d stage1Distro) GCC() PkgBuild {
 	).With(
 		Name("gcc-stage1"),
 		Deps(binutils.Pkg(d)),
-		VersionOf(gcc.SrcPkg(d)),
 	))
 }
 
@@ -260,7 +258,6 @@ func (d stage2Distro) LinuxHeaders() PkgBuild {
 		),
 	).With(
 		Name("linux-headers-stage2"),
-		VersionOf(linux.SrcPkg(d)),
 	))
 }
 
@@ -283,7 +280,6 @@ func (d stage2Distro) Libc() PkgBuild {
 		),
 	).With(
 		Name("libc-stage2"),
-		VersionOf(libc.SrcPkg(d)),
 	))
 }
 
@@ -314,7 +310,6 @@ func (d stage2Distro) Libstdcpp() PkgBuild {
 		),
 	).With(
 		Name("libstdcpp-stage2"),
-		VersionOf(libstdcpp.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -347,7 +342,6 @@ func (d stage2Distro) Binutils() PkgBuild {
 		),
 	).With(
 		Name("binutils-stage2"),
-		VersionOf(binutils.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -408,7 +402,6 @@ func (d stage2Distro) GCC() PkgBuild {
 		),
 	).With(
 		Name("gcc-stage2"),
-		VersionOf(gcc.SrcPkg(d)),
 		Deps(
 			libc.Pkg(d),
 			libstdcpp.Pkg(d),
@@ -438,7 +431,6 @@ func (d stage2Distro) M4() PkgBuild {
 		),
 	).With(
 		Name("m4-stage2"),
-		VersionOf(m4.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -470,7 +462,6 @@ func (d stage2Distro) Ncurses() PkgBuild {
 		),
 	).With(
 		Name("ncurses-stage2"),
-		VersionOf(ncurses.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -495,7 +486,6 @@ func (d stage2Distro) Bash() PkgBuild {
 		),
 	).With(
 		Name("bash-stage2"),
-		VersionOf(bash.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -518,7 +508,6 @@ func (d stage2Distro) Bison() PkgBuild {
 		),
 	).With(
 		Name("bison-stage2"),
-		VersionOf(bison.SrcPkg(d)),
 		Deps(libc.Pkg(d), m4.Pkg(d)),
 	))
 }
@@ -538,7 +527,6 @@ func (d stage2Distro) Bzip2() PkgBuild {
 		),
 	).With(
 		Name("bzip2-stage2"),
-		VersionOf(bzip2.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -563,7 +551,6 @@ func (d stage2Distro) Coreutils() PkgBuild {
 		),
 	).With(
 		Name("coreutils-stage2"),
-		VersionOf(coreutils.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -586,7 +573,6 @@ func (d stage2Distro) Diffutils() PkgBuild {
 		),
 	).With(
 		Name("diffutils-stage2"),
-		VersionOf(diffutils.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -609,7 +595,6 @@ func (d stage2Distro) File() PkgBuild {
 		),
 	).With(
 		Name("file-stage2"),
-		VersionOf(file.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -637,7 +622,6 @@ func (d stage2Distro) Findutils() PkgBuild {
 		),
 	).With(
 		Name("findutils-stage2"),
-		VersionOf(findutils.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -660,7 +644,6 @@ func (d stage2Distro) Awk() PkgBuild {
 		),
 	).With(
 		Name("awk-stage2"),
-		VersionOf(awk.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -684,7 +667,6 @@ func (d stage2Distro) Gettext() PkgBuild {
 		),
 	).With(
 		Name("gettext-stage2"),
-		VersionOf(gettext.SrcPkg(d)),
 		Deps(libc.Pkg(d), ncurses.Pkg(d)),
 	))
 }
@@ -707,7 +689,6 @@ func (d stage2Distro) Grep() PkgBuild {
 		),
 	).With(
 		Name("grep-stage2"),
-		VersionOf(grep.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -730,7 +711,6 @@ func (d stage2Distro) Gzip() PkgBuild {
 		),
 	).With(
 		Name("gzip-stage2"),
-		VersionOf(gzip.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -757,7 +737,6 @@ func (d stage2Distro) Make() PkgBuild {
 		),
 	).With(
 		Name("make-stage2"),
-		VersionOf(make.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -780,7 +759,6 @@ func (d stage2Distro) Patch() PkgBuild {
 		),
 	).With(
 		Name("patch-stage2"),
-		VersionOf(patch.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -810,7 +788,6 @@ func (d stage2Distro) Perl5() PkgBuild {
 		),
 	).With(
 		Name("perl5-stage2"),
-		VersionOf(perl5.SrcPkg(d)),
 		Deps(libc.Pkg(d), bzip2.Pkg(d)),
 	))
 }
@@ -840,7 +817,6 @@ func (d stage2Distro) Python3() PkgBuild {
 		),
 	).With(
 		Name("python3-stage2"),
-		VersionOf(python3.SrcPkg(d)),
 		Deps(libc.Pkg(d), bzip2.Pkg(d), ncurses.Pkg(d), file.Pkg(d)),
 	))
 }
@@ -863,7 +839,6 @@ func (d stage2Distro) Sed() PkgBuild {
 		),
 	).With(
 		Name("sed-stage2"),
-		VersionOf(sed.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -886,7 +861,6 @@ func (d stage2Distro) Tar() PkgBuild {
 		),
 	).With(
 		Name("tar-stage2"),
-		VersionOf(tar.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }
@@ -910,7 +884,6 @@ func (d stage2Distro) Texinfo() PkgBuild {
 		),
 	).With(
 		Name("texinfo-stage2"),
-		VersionOf(texinfo.SrcPkg(d)),
 		Deps(libc.Pkg(d), perl5.Pkg(d)),
 	))
 }
@@ -933,7 +906,6 @@ func (d stage2Distro) Xz() PkgBuild {
 		),
 	).With(
 		Name("xz-stage2"),
-		VersionOf(xz.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	))
 }

@@ -47,7 +47,6 @@ func Default(d interface {
 		),
 	).With(
 		Name("bison"),
-		VersionOf(bison.SrcPkg(d)),
 		Deps(libc.Pkg(d)),
 	).With(opts...))
 }
