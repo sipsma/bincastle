@@ -1,8 +1,10 @@
 package distro
 
 import (
-	. "github.com/sipsma/bincastle/graph"
 	"github.com/sipsma/bincastle/distro/src"
+	. "github.com/sipsma/bincastle/graph"
+
+	"github.com/sipsma/bincastle/distro/pkgs/golang"
 )
 
 type distroSources struct {
@@ -562,24 +564,24 @@ func (d distroSources) GitSrc() PkgBuild {
 	)
 }
 
-/*
-func (d distroSources) GolangSrc() PkgBuild {
+func (d distroSources) GolangBootstrapSrc() PkgBuild {
 	return src.Git(d,
 		src.URL("https://github.com/golang/go.git"),
-		src.Ref("release-branch.go1.13"),
-		Name("golang-src-1.13"),
-		V(1, 13),
-		AltVersions(
-			src.Git(d,
-				src.URL("https://github.com/golang/go.git"),
-				src.Ref("release-branch.go1.4"),
-				Name("golang-src-1.4"),
-				V(1, 4),
-			),
-		),
+		src.Ref("release-branch.go1.4"),
+		Name("golang-bootstrap-src"),
 	)
 }
 
+func (d distroSources) GolangSrc() PkgBuild {
+	return src.Git(d,
+		src.URL("https://github.com/golang/go.git"),
+		src.Ref("release-branch.go1.14"),
+		Name("golang-src"),
+		Deps(golang.BootstrapSrcPkg(d)),
+	)
+}
+
+/*
 func (d distroSources) HomedirSrc() homedir.SrcPkg {
 	return homedir.SrcPkgOnce(d, func() Pkg {
 return src.Git(d,

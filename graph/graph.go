@@ -777,11 +777,11 @@ type versions map[Version]Pkg
 
 type versionsKey struct{}
 
-func AltVersions(graphs ...Graph) Opt {
+func AltVersions(pkgBuilds ...PkgBuild) Opt {
 	return OptFunc(func(p Pkg) Pkg {
-		graph := Merge(graphs...)
 		vs := mkCopy(versionsOf(p))
-		for _, p := range graph.Roots() {
+		for _, pkgBuild := range pkgBuilds {
+			p := pkgBuild.pkg
 			v := VersionOf(p)
 			if v == NoVersion {
 				continue

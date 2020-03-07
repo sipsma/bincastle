@@ -12,8 +12,7 @@ import (
 	. "github.com/sipsma/bincastle/util"
 )
 
-// TODO how to version builds better
-func Golang(d interface {
+func Default(d interface {
 	PkgCache
 	Executor
 	golang.Srcer
@@ -27,20 +26,19 @@ func Golang(d interface {
 		libc.Pkg(d),
 		binutils.Pkg(d),
 		gcc.Pkg(d),
-		golang.SrcPkg(d).With(SwapToVersion(V(1,4))),
 		golang.SrcPkg(d),
 		Shell(
-			`cd /src/golang1.4-src/src`,
+			`cd /src/golang-bootstrap-src/src`,
 			`./make.bash`,
-			`cd /src/golang1.13-src/src`,
+			`cd /src/golang-src/src`,
 			strings.Join([]string{
-				`GOROOT_BOOTSTRAP=/src/golang1.4-src`,
+				`GOROOT_BOOTSTRAP=/src/golang-bootstrap-src`,
 				`GOROOT_FINAL=/usr/lib/go`,
 				`GOBIN=/usr/bin`,
 				`./make.bash`,
 			}, " "),
 			`mkdir -p /usr/lib/go`,
-			`mv /src/golang1.13-src/* /usr/lib/go`,
+			`mv /src/golang-src/* /usr/lib/go`,
 		),
 	).With(
 		Name("golang"),

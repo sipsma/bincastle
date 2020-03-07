@@ -35,6 +35,7 @@ import (
 	"github.com/sipsma/bincastle/distro/builds/gettextbuild"
 	"github.com/sipsma/bincastle/distro/builds/gitbuild"
 	"github.com/sipsma/bincastle/distro/builds/gmpbuild"
+	"github.com/sipsma/bincastle/distro/builds/golangbuild"
 	"github.com/sipsma/bincastle/distro/builds/gperfbuild"
 	"github.com/sipsma/bincastle/distro/builds/grepbuild"
 	"github.com/sipsma/bincastle/distro/builds/groffbuild"
@@ -73,12 +74,11 @@ import (
 	"github.com/sipsma/bincastle/distro/builds/sedbuild"
 	"github.com/sipsma/bincastle/distro/builds/tarbuild"
 	"github.com/sipsma/bincastle/distro/builds/texinfobuild"
+	"github.com/sipsma/bincastle/distro/builds/usersbuild"
 	"github.com/sipsma/bincastle/distro/builds/utillinuxbuild"
 	"github.com/sipsma/bincastle/distro/builds/xzbuild"
 	"github.com/sipsma/bincastle/distro/builds/zlibbuild"
-	"github.com/sipsma/bincastle/distro/builds/usersbuild"
 	"github.com/sipsma/bincastle/distro/pkgs/acl"
-	"github.com/sipsma/bincastle/distro/pkgs/users"
 	"github.com/sipsma/bincastle/distro/pkgs/attr"
 	"github.com/sipsma/bincastle/distro/pkgs/autoconf"
 	"github.com/sipsma/bincastle/distro/pkgs/automake"
@@ -103,6 +103,7 @@ import (
 	"github.com/sipsma/bincastle/distro/pkgs/gettext"
 	"github.com/sipsma/bincastle/distro/pkgs/git"
 	"github.com/sipsma/bincastle/distro/pkgs/gmp"
+	"github.com/sipsma/bincastle/distro/pkgs/golang"
 	"github.com/sipsma/bincastle/distro/pkgs/gperf"
 	"github.com/sipsma/bincastle/distro/pkgs/grep"
 	"github.com/sipsma/bincastle/distro/pkgs/groff"
@@ -141,6 +142,7 @@ import (
 	"github.com/sipsma/bincastle/distro/pkgs/sed"
 	"github.com/sipsma/bincastle/distro/pkgs/tar"
 	"github.com/sipsma/bincastle/distro/pkgs/texinfo"
+	"github.com/sipsma/bincastle/distro/pkgs/users"
 	"github.com/sipsma/bincastle/distro/pkgs/utillinux"
 	"github.com/sipsma/bincastle/distro/pkgs/xz"
 	"github.com/sipsma/bincastle/distro/pkgs/zlib"
@@ -1215,11 +1217,9 @@ func (d distro) Git() PkgBuild {
 	return gitbuild.Default(d)
 }
 
-/* TODO
 func (d distro) Golang() PkgBuild {
 	return golangbuild.Default(d)
 }
-*/
 
 func (d distro) Users() PkgBuild {
 	return usersbuild.SingleUser(d,
@@ -1444,6 +1444,7 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			cacerts.Pkg(d),
 			curl.Pkg(d),
 			git.Pkg(d),
+			golang.Pkg(d),
 			users.Pkg(d),
 			d.MiscFiles(),
 		)

@@ -27,3 +27,15 @@ func SrcPkg(d interface {
 }) graph.Pkg {
 	return d.PkgOnce(srcPkgKey{}, d.GolangSrc)
 }
+
+type BootstrapSrcer interface {
+	GolangBootstrapSrc() graph.PkgBuild
+}
+
+type bootstrapSrcPkgKey struct{}
+func BootstrapSrcPkg(d interface {
+	BootstrapSrcer
+	graph.PkgCache
+}) graph.Pkg {
+	return d.PkgOnce(bootstrapSrcPkgKey{}, d.GolangBootstrapSrc)
+}
