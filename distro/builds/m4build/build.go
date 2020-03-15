@@ -16,26 +16,30 @@ func Default(d interface {
 	m4.Srcer
 	linux.HeadersPkger
 	libc.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		Patch(d, m4.SrcPkg(d), Shell(
-			`cd /src/m4-src`,
-			`sed -i 's/IO_ftrylockfile/IO_EOF_SEEN/' lib/*.c`,
-			`echo "#define _IO_IN_BACKUP 0x100" >> lib/stdio-impl.h`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/m4-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("m4"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) m4.Pkg {
+	return m4.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				Patch(d, d.M4Src(), Shell(
+					`cd /src/m4-src`,
+					`sed -i 's/IO_ftrylockfile/IO_EOF_SEEN/' lib/*.c`,
+					`echo "#define _IO_IN_BACKUP 0x100" >> lib/stdio-impl.h`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/m4-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("m4"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

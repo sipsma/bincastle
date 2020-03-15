@@ -26,29 +26,33 @@ func Default(d interface {
 	pkgconfig.Pkger
 	m4.Pkger
 	automake.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		m4.Pkg(d),
-		automake.Pkg(d),
-		libtasn1.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/libtasn1-src/configure`,
-				`--prefix=/usr`,
-				`--disable-static`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("libtasn1"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) libtasn1.Pkg {
+	return libtasn1.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.M4(),
+				d.Automake(),
+				d.Libtasn1Src(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/libtasn1-src/configure`,
+					`--prefix=/usr`,
+					`--disable-static`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("libtasn1"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

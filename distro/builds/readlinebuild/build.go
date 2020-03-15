@@ -16,32 +16,36 @@ func Default(d interface {
 	readline.Srcer
 	libc.Pkger
 	linux.HeadersPkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		Patch(d, readline.SrcPkg(d), Shell(
-			`cd /src/readline-src`,
-			`sed -i '/MV.*old/d' Makefile.in`,
-			`sed -i '/{OLDSUFF}/c:' support/shlib-install`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/readline-src/configure`,
-				`--prefix=/usr`,
-				`--disable-static`,
-				`--docdir=/usr/share/doc/readline-8.0`,
-			}, " "),
-			`make SHLIB_LIBS="-L/tools/lib -lncursesw"`,
-			`make SHLIB_LIBS="-L/tools/lib -lncursesw" install`,
-			`mv -v /usr/lib/lib{readline,history}.so.* /lib`,
-			`chmod -v u+w /lib/lib{readline,history}.so.*`,
-			`ln -sfv ../../lib/$(readlink /usr/lib/libreadline.so) /usr/lib/libreadline.so`,
-			`ln -sfv ../../lib/$(readlink /usr/lib/libhistory.so ) /usr/lib/libhistory.so`,
-		),
-	).With(
-		Name("readline"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) readline.Pkg {
+	return readline.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				Patch(d, d.ReadlineSrc(), Shell(
+					`cd /src/readline-src`,
+					`sed -i '/MV.*old/d' Makefile.in`,
+					`sed -i '/{OLDSUFF}/c:' support/shlib-install`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/readline-src/configure`,
+					`--prefix=/usr`,
+					`--disable-static`,
+					`--docdir=/usr/share/doc/readline-8.0`,
+				}, " "),
+				`make SHLIB_LIBS="-L/tools/lib -lncursesw"`,
+				`make SHLIB_LIBS="-L/tools/lib -lncursesw" install`,
+				`mv -v /usr/lib/lib{readline,history}.so.* /lib`,
+				`chmod -v u+w /lib/lib{readline,history}.so.*`,
+				`ln -sfv ../../lib/$(readlink /usr/lib/libreadline.so) /usr/lib/libreadline.so`,
+				`ln -sfv ../../lib/$(readlink /usr/lib/libhistory.so ) /usr/lib/libhistory.so`,
+			),
+		).With(
+			Name("readline"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

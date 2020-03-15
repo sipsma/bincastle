@@ -26,36 +26,40 @@ func Default(d interface {
 	pkgconfig.Pkger
 	readline.Pkger
 	ncurses.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		readline.Pkg(d),
-		ncurses.Pkg(d),
-		bash.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/bash-src/configure`,
-				`--prefix=/usr`,
-				`--docdir=/usr/share/doc/bash-5.0`,
-				`--without-bash-malloc`,
-				`--with-installed-readline`,
-			}, " "),
-			`make`,
-			`make install`,
-			`mv -vf /usr/bin/bash /bin`,
-		),
-	).With(
-		Name("bash"),
-		Deps(
-			libc.Pkg(d),
-			readline.Pkg(d),
-			ncurses.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) bash.Pkg {
+	return bash.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Readline(),
+				d.Ncurses(),
+				d.BashSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/bash-src/configure`,
+					`--prefix=/usr`,
+					`--docdir=/usr/share/doc/bash-5.0`,
+					`--without-bash-malloc`,
+					`--with-installed-readline`,
+				}, " "),
+				`make`,
+				`make install`,
+				`mv -vf /usr/bin/bash /bin`,
+			),
+		).With(
+			Name("bash"),
+			RuntimeDeps(
+				d.Libc(),
+				d.Readline(),
+				d.Ncurses(),
+			),
+		).With(opts...)
+	})
 }

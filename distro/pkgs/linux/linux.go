@@ -5,25 +5,27 @@ import (
 )
 
 type HeadersPkger interface {
-	LinuxHeaders() graph.PkgBuild
+	LinuxHeaders() HeadersPkg
+}
+
+type HeadersPkg struct {
+	graph.Pkg
 }
 
 type headersPkgKey struct{}
-func HeadersPkg(d interface {
-	HeadersPkger
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(headersPkgKey{}, d.LinuxHeaders)
+func BuildHeadersPkg(pc graph.PkgCache, f func() graph.Pkg) HeadersPkg {
+	return HeadersPkg{pc.PkgOnce(headersPkgKey{}, f)}
 }
 
 type Srcer interface{
-	LinuxSrc() graph.PkgBuild
+	LinuxSrc() SrcPkg
+}
+
+type SrcPkg struct {
+	graph.Pkg
 }
 
 type srcPkgKey struct{}
-func SrcPkg(d interface {
-	Srcer
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(srcPkgKey{}, d.LinuxSrc)
+func BuildSrcPkg(pc graph.PkgCache, f func() graph.Pkg) SrcPkg {
+	return SrcPkg{pc.PkgOnce(srcPkgKey{}, f)}
 }

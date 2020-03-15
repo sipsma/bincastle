@@ -20,27 +20,31 @@ func Default(d interface {
 	libc.Pkger
 	binutils.Pkger
 	gmp.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gmp.Pkg(d),
-		mpfr.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/mpfr-src/configure`,
-				`--prefix=/usr`,
-				`--disable-static`,
-				`--enable-thread-safe`,
-				`--docdir=/usr/share/doc/mpfr-4.0.2`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("mpfr"),
-		Deps(libc.Pkg(d), gmp.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) mpfr.Pkg {
+	return mpfr.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GMP(),
+				d.MPFRSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/mpfr-src/configure`,
+					`--prefix=/usr`,
+					`--disable-static`,
+					`--enable-thread-safe`,
+					`--docdir=/usr/share/doc/mpfr-4.0.2`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("mpfr"),
+			RuntimeDeps(d.Libc(), d.GMP()),
+		).With(opts...)
+	})
 }

@@ -28,35 +28,39 @@ func Default(d interface {
 	libtool.Pkger
 	perl5.Pkger
 	autoconf.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		libtool.Pkg(d),
-		perl5.Pkg(d),
-		autoconf.Pkg(d),
-		automake.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/automake-src/configure`,
-				`--prefix=/usr`,
-				`--docdir=/usr/share/doc/automake-1.16.1`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("automake"),
-		Deps(
-			libc.Pkg(d),
-			m4.Pkg(d),
-			perl5.Pkg(d),
-			autoconf.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) automake.Pkg {
+	return automake.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.M4(),
+				d.Libtool(),
+				d.Perl5(),
+				d.Autoconf(),
+				d.AutomakeSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/automake-src/configure`,
+					`--prefix=/usr`,
+					`--docdir=/usr/share/doc/automake-1.16.1`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("automake"),
+			RuntimeDeps(
+				d.Libc(),
+				d.M4(),
+				d.Perl5(),
+				d.Autoconf(),
+			),
+		).With(opts...)
+	})
 }

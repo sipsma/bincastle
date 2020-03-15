@@ -24,28 +24,32 @@ func Default(d interface {
 	gcc.Pkger
 	pkgconfig.Pkger
 	ncurses.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		ncurses.Pkg(d),
-		texinfo.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/texinfo-src/configure`,
-				`--prefix=/usr`,
-				`--disable-static`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("texinfo"),
-		Deps(libc.Pkg(d), ncurses.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) texinfo.Pkg {
+	return texinfo.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Ncurses(),
+				d.TexinfoSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/texinfo-src/configure`,
+					`--prefix=/usr`,
+					`--disable-static`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("texinfo"),
+			RuntimeDeps(d.Libc(), d.Ncurses()),
+		).With(opts...)
+	})
 }

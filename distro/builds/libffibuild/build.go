@@ -22,32 +22,36 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	pkgconfig.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		Patch(d, libffi.SrcPkg(d), Shell(
-			`cd /src/libffi-src`,
-			`sed -e '/^includesdir/ s/$(libdir).*$/$(includedir)/' -i include/Makefile.in`,
-			`sed -e '/^includedir/ s/=.*$/=@includedir@/' -e 's/^Cflags: -I${includedir}/Cflags:/' -i libffi.pc.in`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/libffi-src/configure`,
-				`--prefix=/usr`,
-				`--disable-static`,
-				`--with-gcc-arch=native`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("libffi"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) libffi.Pkg {
+	return libffi.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				Patch(d, d.LibffiSrc(), Shell(
+					`cd /src/libffi-src`,
+					`sed -e '/^includesdir/ s/$(libdir).*$/$(includedir)/' -i include/Makefile.in`,
+					`sed -e '/^includedir/ s/=.*$/=@includedir@/' -e 's/^Cflags: -I${includedir}/Cflags:/' -i libffi.pc.in`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/libffi-src/configure`,
+					`--prefix=/usr`,
+					`--disable-static`,
+					`--with-gcc-arch=native`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("libffi"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

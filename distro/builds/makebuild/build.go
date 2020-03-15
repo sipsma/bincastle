@@ -22,29 +22,33 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	pkgconfig.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		Patch(d, make.SrcPkg(d), Shell(
-			`cd /src/make-src`,
-			`sed -i '211,217 d; 219,229 d; 232 d' glob/glob.c`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/make-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("make"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) make.Pkg {
+	return make.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				Patch(d, d.MakeSrc(), Shell(
+					`cd /src/make-src`,
+					`sed -i '211,217 d; 219,229 d; 232 d' glob/glob.c`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/make-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("make"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

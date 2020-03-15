@@ -26,33 +26,37 @@ func Default(d interface {
 	pkgconfig.Pkger
 	attr.Pkger
 	acl.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		attr.Pkg(d),
-		acl.Pkg(d),
-		tar.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/tar-src/configure`,
-				`--prefix=/usr`,
-				`--bindir=/bin`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("tar"),
-		Deps(
-			libc.Pkg(d),
-			attr.Pkg(d),
-			acl.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) tar.Pkg {
+	return tar.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Attr(),
+				d.Acl(),
+				d.TarSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/tar-src/configure`,
+					`--prefix=/usr`,
+					`--bindir=/bin`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("tar"),
+			RuntimeDeps(
+				d.Libc(),
+				d.Attr(),
+				d.Acl(),
+			),
+		).With(opts...)
+	})
 }

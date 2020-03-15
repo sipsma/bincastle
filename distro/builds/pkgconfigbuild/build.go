@@ -22,29 +22,33 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	file.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		file.Pkg(d),
-		pkgconfig.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/pkgconfig-src/configure`,
-				`--prefix=/usr`,
-				`--with-internal-glib`,
-				`--disable-host-tool`,
-				`--docdir=/usr/share/doc/pkg-config-0.29.2`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("pkgconfig"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) pkgconfig.Pkg {
+	return pkgconfig.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.File(),
+				d.PkgConfigSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/pkgconfig-src/configure`,
+					`--prefix=/usr`,
+					`--with-internal-glib`,
+					`--disable-host-tool`,
+					`--docdir=/usr/share/doc/pkg-config-0.29.2`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("pkgconfig"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

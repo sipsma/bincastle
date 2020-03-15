@@ -26,38 +26,42 @@ func Default(d interface {
 	pkgconfig.Pkger
 	readline.Pkger
 	ncurses.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		readline.Pkg(d),
-		ncurses.Pkg(d),
-		inetutils.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/inetutils-src/configure`,
-				`--prefix=/usr`,
-				`--localstatedir=/var`,
-				`--disable-logger`,
-				`--disable-whois`,
-				`--disable-rcp`,
-				`--disable-rexec`,
-				`--disable-rlogin`,
-				`--disable-rsh`,
-				`--disable-servers`,
-			}, " "),
-			`make`,
-			`make install`,
-			`mv -v /usr/bin/{hostname,ping,ping6,traceroute} /bin`,
-			`mv -v /usr/bin/ifconfig /sbin`,
-		),
-	).With(
-		Name("inetutils"),
-		Deps(libc.Pkg(d), readline.Pkg(d), ncurses.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) inetutils.Pkg {
+	return inetutils.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Readline(),
+				d.Ncurses(),
+				d.InetutilsSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/inetutils-src/configure`,
+					`--prefix=/usr`,
+					`--localstatedir=/var`,
+					`--disable-logger`,
+					`--disable-whois`,
+					`--disable-rcp`,
+					`--disable-rexec`,
+					`--disable-rlogin`,
+					`--disable-rsh`,
+					`--disable-servers`,
+				}, " "),
+				`make`,
+				`make install`,
+				`mv -v /usr/bin/{hostname,ping,ping6,traceroute} /bin`,
+				`mv -v /usr/bin/ifconfig /sbin`,
+			),
+		).With(
+			Name("inetutils"),
+			RuntimeDeps(d.Libc(), d.Readline(), d.Ncurses()),
+		).With(opts...)
+	})
 }

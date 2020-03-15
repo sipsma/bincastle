@@ -22,27 +22,31 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	pkgconfig.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		grep.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/grep-src/configure`,
-				`--prefix=/usr`,
-				`--bindir=/bin`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("grep"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) grep.Pkg {
+	return grep.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.GrepSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/grep-src/configure`,
+					`--prefix=/usr`,
+					`--bindir=/bin`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("grep"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

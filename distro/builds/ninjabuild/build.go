@@ -22,28 +22,32 @@ func Default(d interface {
 	gcc.Pkger
 	pkgconfig.Pkger
 	python3.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		python3.Pkg(d),
-		ninja.SrcPkg(d).With(DiscardChanges()),
-		Shell(
-			`cd /src/ninja-src`,
-			`python3 /src/ninja-src/configure.py --bootstrap`,
-			`install -vm755 ninja /usr/bin/`,
-			`install -vDm644 misc/bash-completion /usr/share/bash-completion/completions/ninja`,
-			`install -vDm644 misc/zsh-completion  /usr/share/zsh/site-functions/_ninja`,
-		),
-	).With(
-		Name("ninja"),
-		Deps(
-			libc.Pkg(d),
-			gcc.Pkg(d),
-			python3.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) ninja.Pkg {
+	return ninja.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Python3(),
+				d.NinjaSrc().With(DiscardChanges()),
+			),
+			Shell(
+				`cd /src/ninja-src`,
+				`python3 /src/ninja-src/configure.py --bootstrap`,
+				`install -vm755 ninja /usr/bin/`,
+				`install -vDm644 misc/bash-completion /usr/share/bash-completion/completions/ninja`,
+				`install -vDm644 misc/zsh-completion  /usr/share/zsh/site-functions/_ninja`,
+			),
+		).With(
+			Name("ninja"),
+			RuntimeDeps(
+				d.Libc(),
+				d.GCC(),
+				d.Python3(),
+			),
+		).With(opts...)
+	})
 }

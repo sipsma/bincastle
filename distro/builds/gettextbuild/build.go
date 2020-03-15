@@ -28,38 +28,42 @@ func Default(d interface {
 	acl.Pkger
 	attr.Pkger
 	ncurses.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		acl.Pkg(d),
-		attr.Pkg(d),
-		ncurses.Pkg(d),
-		gettext.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/gettext-src/configure`,
-				`--prefix=/usr`,
-				`--disable-static`,
-				`--docdir=/usr/share/doc/gettext-0.20.1`,
-			}, " "),
-			`make`,
-			`make install`,
-			`chmod -v 0755 /usr/lib/preloadable_libintl.so`,
-		),
-	).With(
-		Name("gettext"),
-		Deps(
-			libc.Pkg(d),
-			gcc.Pkg(d),
-			acl.Pkg(d),
-			attr.Pkg(d),
-			ncurses.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) gettext.Pkg {
+	return gettext.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Acl(),
+				d.Attr(),
+				d.Ncurses(),
+				d.GettextSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/gettext-src/configure`,
+					`--prefix=/usr`,
+					`--disable-static`,
+					`--docdir=/usr/share/doc/gettext-0.20.1`,
+				}, " "),
+				`make`,
+				`make install`,
+				`chmod -v 0755 /usr/lib/preloadable_libintl.so`,
+			),
+		).With(
+			Name("gettext"),
+			RuntimeDeps(
+				d.Libc(),
+				d.GCC(),
+				d.Acl(),
+				d.Attr(),
+				d.Ncurses(),
+			),
+		).With(opts...)
+	})
 }

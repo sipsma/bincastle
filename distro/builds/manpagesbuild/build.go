@@ -10,14 +10,18 @@ func Default(d interface {
 	PkgCache
 	Executor
 	manpages.Srcer
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		manpages.SrcPkg(d),
-		Shell(
-			"cd /src/manpages-src",
-			`make install`,
-		),
-	).With(
-		Name("manpages"),
-	).With(opts...))
+}, opts ...Opt) manpages.Pkg {
+	return manpages.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.ManpagesSrc(),
+			),
+			Shell(
+				"cd /src/manpages-src",
+				`make install`,
+			),
+		).With(
+			Name("manpages"),
+		).With(opts...)
+	})
 }

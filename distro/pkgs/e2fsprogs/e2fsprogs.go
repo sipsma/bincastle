@@ -5,25 +5,27 @@ import (
 )
 
 type Pkger interface {
-	E2fsprogs() graph.PkgBuild
+	E2fsprogs() Pkg
+}
+
+type Pkg struct {
+	graph.Pkg
 }
 
 type pkgKey struct{}
-func Pkg(d interface {
-	Pkger
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(pkgKey{}, d.E2fsprogs)
+func BuildPkg(pc graph.PkgCache, f  func() graph.Pkg) Pkg {
+	return Pkg{pc.PkgOnce(pkgKey{}, f)}
 }
 
 type Srcer interface {
-	E2fsprogsSrc() graph.PkgBuild
+	E2fsprogsSrc() SrcPkg
+}
+
+type SrcPkg struct {
+	graph.Pkg
 }
 
 type srcPkgKey struct{}
-func SrcPkg(d interface {
-	Srcer
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(srcPkgKey{}, d.E2fsprogsSrc)
+func BuildSrcPkg(pc graph.PkgCache, f func() graph.Pkg) SrcPkg {
+	return SrcPkg{pc.PkgOnce(srcPkgKey{}, f)}
 }

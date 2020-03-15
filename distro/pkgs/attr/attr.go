@@ -5,25 +5,27 @@ import (
 )
 
 type Pkger interface {
-	Attr() graph.PkgBuild
+	Attr() Pkg
+}
+
+type Pkg struct {
+	graph.Pkg
 }
 
 type pkgKey struct{}
-func Pkg(d interface {
-	Pkger
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(pkgKey{}, d.Attr)
+func BuildPkg(pc graph.PkgCache, f  func() graph.Pkg) Pkg {
+	return Pkg{pc.PkgOnce(pkgKey{}, f)}
 }
 
 type Srcer interface {
-	AttrSrc() graph.PkgBuild
+	AttrSrc() SrcPkg
+}
+
+type SrcPkg struct {
+	graph.Pkg
 }
 
 type srcPkgKey struct{}
-func SrcPkg(d interface {
-	Srcer
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(srcPkgKey{}, d.AttrSrc)
+func BuildSrcPkg(pc graph.PkgCache, f func() graph.Pkg) SrcPkg {
+	return SrcPkg{pc.PkgOnce(srcPkgKey{}, f)}
 }

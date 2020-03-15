@@ -5,37 +5,40 @@ import (
 )
 
 type Pkger interface {
-	Golang() graph.PkgBuild
+	Golang() Pkg
+}
+
+type Pkg struct {
+	graph.Pkg
 }
 
 type pkgKey struct{}
-func Pkg(d interface {
-	Pkger
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(pkgKey{}, d.Golang)
+func BuildPkg(pc graph.PkgCache, f  func() graph.Pkg) Pkg {
+	return Pkg{pc.PkgOnce(pkgKey{}, f)}
 }
 
 type Srcer interface {
-	GolangSrc() graph.PkgBuild
+	GolangSrc() SrcPkg
+}
+
+type SrcPkg struct {
+	graph.Pkg
 }
 
 type srcPkgKey struct{}
-func SrcPkg(d interface {
-	Srcer
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(srcPkgKey{}, d.GolangSrc)
+func BuildSrcPkg(pc graph.PkgCache, f func() graph.Pkg) SrcPkg {
+	return SrcPkg{pc.PkgOnce(srcPkgKey{}, f)}
 }
 
 type BootstrapSrcer interface {
-	GolangBootstrapSrc() graph.PkgBuild
+	GolangBootstrapSrc() BootstrapSrcPkg
+}
+
+type BootstrapSrcPkg struct {
+	graph.Pkg
 }
 
 type bootstrapSrcPkgKey struct{}
-func BootstrapSrcPkg(d interface {
-	BootstrapSrcer
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(bootstrapSrcPkgKey{}, d.GolangBootstrapSrc)
+func BuildBootstrapSrcPkg(pc graph.PkgCache, f func() graph.Pkg) BootstrapSrcPkg {
+	return BootstrapSrcPkg{pc.PkgOnce(bootstrapSrcPkgKey{}, f)}
 }

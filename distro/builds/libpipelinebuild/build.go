@@ -24,27 +24,31 @@ func Default(d interface {
 	gcc.Pkger
 	pkgconfig.Pkger
 	file.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		file.Pkg(d),
-		libpipeline.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/libpipeline-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("libpipeline"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) libpipeline.Pkg {
+	return libpipeline.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.File(),
+				d.LibpipelineSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/libpipeline-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("libpipeline"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

@@ -18,23 +18,27 @@ func Default(d interface {
 	linux.HeadersPkger
 	libc.Pkger
 	zlib.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		zlib.Pkg(d),
-		file.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/file-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("file"),
-		Deps(libc.Pkg(d), zlib.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) file.Pkg {
+	return file.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Zlib(),
+				d.FileSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/file-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("file"),
+			RuntimeDeps(d.Libc(), d.Zlib()),
+		).With(opts...)
+	})
 }

@@ -22,28 +22,32 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	pkgconfig.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		expat.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/expat-src/configure`,
-				`--prefix=/usr`,
-				`--disable-static`,
-				`--docdir=/usr/share/doc/expat-2.2.7`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("expat"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) expat.Pkg {
+	return expat.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.ExpatSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/expat-src/configure`,
+					`--prefix=/usr`,
+					`--disable-static`,
+					`--docdir=/usr/share/doc/expat-2.2.7`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("expat"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

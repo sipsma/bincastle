@@ -24,27 +24,31 @@ func Default(d interface {
 	gcc.Pkger
 	pkgconfig.Pkger
 	coreutils.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		coreutils.Pkg(d),
-		diffutils.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/diffutils-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("diffutils"),
-		Deps(libc.Pkg(d), coreutils.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) diffutils.Pkg {
+	return diffutils.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Coreutils(),
+				d.DiffutilsSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/diffutils-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("diffutils"),
+			RuntimeDeps(d.Libc(), d.Coreutils()),
+		).With(opts...)
+	})
 }

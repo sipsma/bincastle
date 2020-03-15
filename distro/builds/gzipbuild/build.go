@@ -26,29 +26,33 @@ func Default(d interface {
 	pkgconfig.Pkger
 	bash.Pkger
 	grep.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		bash.Pkg(d),
-		grep.Pkg(d),
-		gzip.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/gzip-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-			`mv -v /usr/bin/gzip /bin`,
-		),
-	).With(
-		Name("gzip"),
-		Deps(libc.Pkg(d), bash.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) gzip.Pkg {
+	return gzip.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Bash(),
+				d.Grep(),
+				d.GzipSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/gzip-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+				`mv -v /usr/bin/gzip /bin`,
+			),
+		).With(
+			Name("gzip"),
+			RuntimeDeps(d.Libc(), d.Bash()),
+		).With(opts...)
+	})
 }

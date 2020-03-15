@@ -30,40 +30,44 @@ func Default(d interface {
 	perl5.Pkger
 	gettext.Pkger
 	bash.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		libtool.Pkg(d),
-		perl5.Pkg(d),
-		gettext.Pkg(d),
-		bash.Pkg(d),
-		Patch(d, autoconf.SrcPkg(d), Shell(
-			`cd /src/autoconf-src`,
-			`sed '361 s/{/\\{/' -i bin/autoscan.in`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/autoconf-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("autoconf"),
-		Deps(
-			libc.Pkg(d),
-			m4.Pkg(d),
-			libtool.Pkg(d),
-			perl5.Pkg(d),
-			gettext.Pkg(d),
-			bash.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) autoconf.Pkg {
+	return autoconf.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.M4(),
+				d.Libtool(),
+				d.Perl5(),
+				d.Gettext(),
+				d.Bash(),
+				Patch(d, d.AutoconfSrc(), Shell(
+					`cd /src/autoconf-src`,
+					`sed '361 s/{/\\{/' -i bin/autoscan.in`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/autoconf-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("autoconf"),
+			RuntimeDeps(
+				d.Libc(),
+				d.M4(),
+				d.Libtool(),
+				d.Perl5(),
+				d.Gettext(),
+				d.Bash(),
+			),
+		).With(opts...)
+	})
 }

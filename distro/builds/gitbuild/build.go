@@ -29,34 +29,38 @@ func Default(d interface {
 	curl.Pkger
 	cacerts.Pkger
 	// TODO libpcre?
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		zlib.Pkg(d),
-		curl.Pkg(d),
-		git.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /src/git-src`,
-			strings.Join([]string{
-				`/src/git-src/configure`,
-				`--prefix=/usr`,
-				`--with-gitconfig=/etc/gitconfig`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("git"),
-		Deps(
-			libc.Pkg(d),
-			zlib.Pkg(d),
-			cacerts.Pkg(d),
-			curl.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) git.Pkg {
+	return git.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.M4(),
+				d.Zlib(),
+				d.Curl(),
+				d.GitSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /src/git-src`,
+				strings.Join([]string{
+					`/src/git-src/configure`,
+					`--prefix=/usr`,
+					`--with-gitconfig=/etc/gitconfig`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("git"),
+			RuntimeDeps(
+				d.Libc(),
+				d.Zlib(),
+				d.CACerts(),
+				d.Curl(),
+			),
+		).With(opts...)
+	})
 }

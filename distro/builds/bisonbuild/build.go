@@ -23,30 +23,34 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	m4.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		Patch(d, bison.SrcPkg(d), Shell(
-			`cd /src/bison-src`,
-			`sed -i '6855 s/mv/cp/' Makefile.in`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/bison-src/configure`,
-				`--prefix=/usr`,
-				`--docdir=/usr/share/doc/bison-3.4.1`,
-			}, " "),
-			`make -j1`,
-			`make install`,
-		),
-	).With(
-		Name("bison"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) bison.Pkg {
+	return bison.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.M4(),
+				Patch(d, d.BisonSrc(), Shell(
+					`cd /src/bison-src`,
+					`sed -i '6855 s/mv/cp/' Makefile.in`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/bison-src/configure`,
+					`--prefix=/usr`,
+					`--docdir=/usr/share/doc/bison-3.4.1`,
+				}, " "),
+				`make -j1`,
+				`make install`,
+			),
+		).With(
+			Name("bison"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

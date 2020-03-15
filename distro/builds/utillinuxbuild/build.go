@@ -28,51 +28,55 @@ func Default(d interface {
 	ncurses.Pkger
 	readline.Pkger
 	zlib.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		ncurses.Pkg(d),
-		readline.Pkg(d),
-		zlib.Pkg(d),
-		utillinux.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			`mkdir -pv /var/lib/hwclock`,
-			strings.Join([]string{
-				`/src/utillinux-src/configure`,
-				`ADJTIME_PATH=/var/lib/hwclock/adjtime`,
-				`--docdir=/usr/share/doc/util-linux-2.34`,
-				`--disable-chfn-chsh`,
-				`--disable-login`,
-				`--disable-nologin`,
-				`--disable-su`,
-				`--disable-setpriv`,
-				`--disable-runuser`,
-				`--disable-pylibmount`,
-				`--disable-static`,
-				`--without-python`,
-				`--without-systemd`,
-				`--without-systemdsystemunitdir`,
-				// TODO below are only to avoid errors in userns
-				`--disable-use-tty-group`,
-				`--disable-makeinstall-chown`,
-				`--disable-makeinstall-setuid`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("utillinux"),
-		Deps(
-			libc.Pkg(d),
-			ncurses.Pkg(d),
-			readline.Pkg(d),
-			zlib.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) utillinux.Pkg {
+	return utillinux.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Ncurses(),
+				d.Readline(),
+				d.Zlib(),
+				d.UtilLinuxSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				`mkdir -pv /var/lib/hwclock`,
+				strings.Join([]string{
+					`/src/utillinux-src/configure`,
+					`ADJTIME_PATH=/var/lib/hwclock/adjtime`,
+					`--docdir=/usr/share/doc/util-linux-2.34`,
+					`--disable-chfn-chsh`,
+					`--disable-login`,
+					`--disable-nologin`,
+					`--disable-su`,
+					`--disable-setpriv`,
+					`--disable-runuser`,
+					`--disable-pylibmount`,
+					`--disable-static`,
+					`--without-python`,
+					`--without-systemd`,
+					`--without-systemdsystemunitdir`,
+					// TODO below are only to avoid errors in userns
+					`--disable-use-tty-group`,
+					`--disable-makeinstall-chown`,
+					`--disable-makeinstall-setuid`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("utillinux"),
+			RuntimeDeps(
+				d.Libc(),
+				d.Ncurses(),
+				d.Readline(),
+				d.Zlib(),
+			),
+		).With(opts...)
+	})
 }

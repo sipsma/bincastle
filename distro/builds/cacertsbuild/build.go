@@ -16,24 +16,28 @@ func Default(d interface {
 	p11kit.Pkger
 	openssl.Pkger
 	coreutils.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		p11kit.Pkg(d),
-		openssl.Pkg(d),
-		coreutils.Pkg(d),
-		cacerts.SrcPkg(d).With(DiscardChanges()),
-		Shell(
-			`cd /src/cacerts-src`,
-			`make -j1 install`,
-			`install -vdm755 /etc/ssl/local`,
-			`/usr/sbin/make-ca -g`,
-		),
-	).With(
-		Name("cacerts"),
-		Deps(
-			p11kit.Pkg(d),
-			openssl.Pkg(d),
-			coreutils.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) cacerts.Pkg {
+	return cacerts.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.P11kit(),
+				d.OpenSSL(),
+				d.Coreutils(),
+				d.CACertsSrc().With(DiscardChanges()),
+			),
+			Shell(
+				`cd /src/cacerts-src`,
+				`make -j1 install`,
+				`install -vdm755 /etc/ssl/local`,
+				`/usr/sbin/make-ca -g`,
+			),
+		).With(
+			Name("cacerts"),
+			RuntimeDeps(
+				d.P11kit(),
+				d.OpenSSL(),
+				d.Coreutils(),
+			),
+		).With(opts...)
+	})
 }

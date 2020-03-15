@@ -5,25 +5,27 @@ import (
 )
 
 type Pkger interface {
-	Libtasn1() graph.PkgBuild
+	Libtasn1() Pkg
+}
+
+type Pkg struct {
+	graph.Pkg
 }
 
 type pkgKey struct{}
-func Pkg(d interface {
-	Pkger
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(pkgKey{}, d.Libtasn1)
+func BuildPkg(pc graph.PkgCache, f  func() graph.Pkg) Pkg {
+	return Pkg{pc.PkgOnce(pkgKey{}, f)}
 }
 
 type Srcer interface {
-	Libtasn1Src() graph.PkgBuild
+	Libtasn1Src() SrcPkg
+}
+
+type SrcPkg struct {
+	graph.Pkg
 }
 
 type srcPkgKey struct{}
-func SrcPkg(d interface {
-	Srcer
-	graph.PkgCache
-}) graph.Pkg {
-	return d.PkgOnce(srcPkgKey{}, d.Libtasn1Src)
+func BuildSrcPkg(pc graph.PkgCache, f func() graph.Pkg) SrcPkg {
+	return SrcPkg{pc.PkgOnce(srcPkgKey{}, f)}
 }

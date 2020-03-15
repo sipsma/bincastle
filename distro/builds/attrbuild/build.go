@@ -22,32 +22,36 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	pkgconfig.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		attr.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/attr-src/configure`,
-				`--prefix=/usr`,
-				`--bindir=/bin`,
-				`--disable-static`,
-				`--sysconfdir=/etc`,
-				`--docdir=/usr/share/doc/attr-2.4.48`,
-			}, " "),
-			`make`,
-			`make install`,
-			`mv -v /usr/lib/libattr.so.* /lib`,
-			`ln -sfv ../../lib/$(readlink /usr/lib/libattr.so) /usr/lib/libattr.so`,
-		),
-	).With(
-		Name("attr"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) attr.Pkg {
+	return attr.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.AttrSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/attr-src/configure`,
+					`--prefix=/usr`,
+					`--bindir=/bin`,
+					`--disable-static`,
+					`--sysconfdir=/etc`,
+					`--docdir=/usr/share/doc/attr-2.4.48`,
+				}, " "),
+				`make`,
+				`make install`,
+				`mv -v /usr/lib/libattr.so.* /lib`,
+				`ln -sfv ../../lib/$(readlink /usr/lib/libattr.so) /usr/lib/libattr.so`,
+			),
+		).With(
+			Name("attr"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

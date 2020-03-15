@@ -22,45 +22,49 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	pkgconfig.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		Patch(d, ncurses.SrcPkg(d), Shell(
-			`cd /src/ncurses-src`,
-			`sed -i '/LIBTOOL_INSTALL/d' c++/Makefile.in`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/ncurses-src/configure`,
-				`--prefix=/usr`,
-				`--mandir=/usr/share/man`,
-				`--with-shared`,
-				`--without-debug`,
-				`--without-normal`,
-				`--enable-pc-files`,
-				`--enable-widec`,
-			}, " "),
-			`make`,
-			`make install`,
-			`mv -v /usr/lib/libncursesw.so.6* /lib`,
-			`ln -sfv ../../lib/$(readlink /usr/lib/libncursesw.so) /usr/lib/libncursesw.so`,
-			`for lib in ncurses form panel menu ; do`,
-			`rm -vf /usr/lib/lib${lib}.so`,
-			`echo "INPUT(-l${lib}w)" > /usr/lib/lib${lib}.so`,
-			`ln -sfv ${lib}w.pc /usr/lib/pkgconfig/${lib}.pc`,
-			`done`,
-			`rm -vf /usr/lib/libcursesw.so`,
-			`echo "INPUT(-lncursesw)" > /usr/lib/libcursesw.so`,
-			`ln -sfv libncurses.so /usr/lib/libcurses.so`,
-		),
-	).With(
-		Name("ncurses"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) ncurses.Pkg {
+	return ncurses.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				Patch(d, d.NcursesSrc(), Shell(
+					`cd /src/ncurses-src`,
+					`sed -i '/LIBTOOL_INSTALL/d' c++/Makefile.in`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/ncurses-src/configure`,
+					`--prefix=/usr`,
+					`--mandir=/usr/share/man`,
+					`--with-shared`,
+					`--without-debug`,
+					`--without-normal`,
+					`--enable-pc-files`,
+					`--enable-widec`,
+				}, " "),
+				`make`,
+				`make install`,
+				`mv -v /usr/lib/libncursesw.so.6* /lib`,
+				`ln -sfv ../../lib/$(readlink /usr/lib/libncursesw.so) /usr/lib/libncursesw.so`,
+				`for lib in ncurses form panel menu ; do`,
+				`rm -vf /usr/lib/lib${lib}.so`,
+				`echo "INPUT(-l${lib}w)" > /usr/lib/lib${lib}.so`,
+				`ln -sfv ${lib}w.pc /usr/lib/pkgconfig/${lib}.pc`,
+				`done`,
+				`rm -vf /usr/lib/libcursesw.so`,
+				`echo "INPUT(-lncursesw)" > /usr/lib/libcursesw.so`,
+				`ln -sfv libncurses.so /usr/lib/libcurses.so`,
+			),
+		).With(
+			Name("ncurses"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

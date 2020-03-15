@@ -28,40 +28,44 @@ func Default(d interface {
 	gzip.Pkger
 	texinfo.Pkger
 	utillinux.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		gzip.Pkg(d),
-		texinfo.Pkg(d),
-		utillinux.Pkg(d),
-		e2fsprogs.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/e2fsprogs-src/configure`,
-				`--prefix=/usr`,
-				`--bindir=/bin`,
-				`--with-root-prefix=""`,
-				`--enable-elf-shlibs`,
-				`--disable-libblkid`,
-				`--disable-libuuid`,
-				`--disable-uuidd`,
-				`--disable-fsck`,
-			}, " "),
-			`make`,
-			`make install`,
-			`make install-libs`,
-			`chmod -v u+w /usr/lib/{libcom_err,libe2p,libext2fs,libss}.a`,
-			`gunzip -v /usr/share/info/libext2fs.info.gz`,
-			`install-info --dir-file=/usr/share/info/dir /usr/share/info/libext2fs.info`,
-		),
-	).With(
-		Name("e2fsprogs"),
-		Deps(libc.Pkg(d), utillinux.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) e2fsprogs.Pkg {
+	return e2fsprogs.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Gzip(),
+				d.Texinfo(),
+				d.UtilLinux(),
+				d.E2fsprogsSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/e2fsprogs-src/configure`,
+					`--prefix=/usr`,
+					`--bindir=/bin`,
+					`--with-root-prefix=""`,
+					`--enable-elf-shlibs`,
+					`--disable-libblkid`,
+					`--disable-libuuid`,
+					`--disable-uuidd`,
+					`--disable-fsck`,
+				}, " "),
+				`make`,
+				`make install`,
+				`make install-libs`,
+				`chmod -v u+w /usr/lib/{libcom_err,libe2p,libext2fs,libss}.a`,
+				`gunzip -v /usr/share/info/libext2fs.info.gz`,
+				`install-info --dir-file=/usr/share/info/dir /usr/share/info/libext2fs.info`,
+			),
+		).With(
+			Name("e2fsprogs"),
+			RuntimeDeps(d.Libc(), d.UtilLinux()),
+		).With(opts...)
+	})
 }

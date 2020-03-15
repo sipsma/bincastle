@@ -16,24 +16,28 @@ func Default(d interface {
 	zlib.Srcer
 	libc.Pkger
 	linux.HeadersPkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		zlib.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/zlib-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-			`mv -v /usr/lib/libz.so.* /lib`,
-			`ln -sfv ../../lib/$(readlink /usr/lib/libz.so) /usr/lib/libz.so`,
-		),
-	).With(
-		Name("zlib"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) zlib.Pkg {
+	return zlib.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.ZlibSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/zlib-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+				`mv -v /usr/lib/libz.so.* /lib`,
+				`ln -sfv ../../lib/$(readlink /usr/lib/libz.so) /usr/lib/libz.so`,
+			),
+		).With(
+			Name("zlib"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

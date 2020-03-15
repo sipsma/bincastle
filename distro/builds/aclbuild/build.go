@@ -26,34 +26,38 @@ func Default(d interface {
 	pkgconfig.Pkger
 	file.Pkger
 	attr.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		file.Pkg(d),
-		attr.Pkg(d),
-		acl.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/acl-src/configure`,
-				`--prefix=/usr`,
-				`--bindir=/bin`,
-				`--disable-static`,
-				`--libexecdir=/usr/lib`,
-				`--docdir=/usr/share/doc/acl-2.2.53`,
-			}, " "),
-			`make`,
-			`make install`,
-			`mv -v /usr/lib/libacl.so.* /lib`,
-			`ln -sfv ../../lib/$(readlink /usr/lib/libacl.so) /usr/lib/libacl.so`,
-		),
-	).With(
-		Name("acl"),
-		Deps(libc.Pkg(d), attr.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) acl.Pkg {
+	return acl.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.File(),
+				d.Attr(),
+				d.AclSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/acl-src/configure`,
+					`--prefix=/usr`,
+					`--bindir=/bin`,
+					`--disable-static`,
+					`--libexecdir=/usr/lib`,
+					`--docdir=/usr/share/doc/acl-2.2.53`,
+				}, " "),
+				`make`,
+				`make install`,
+				`mv -v /usr/lib/libacl.so.* /lib`,
+				`ln -sfv ../../lib/$(readlink /usr/lib/libacl.so) /usr/lib/libacl.so`,
+			),
+		).With(
+			Name("acl"),
+			RuntimeDeps(d.Libc(), d.Attr()),
+		).With(opts...)
+	})
 }

@@ -32,39 +32,43 @@ func Default(d interface {
 	openssl.Pkger
 	zlib.Pkger
 	cacerts.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		m4.Pkg(d),
-		autoconf.Pkg(d),
-		openssl.Pkg(d),
-		zlib.Pkg(d),
-		cacerts.Pkg(d),
-		curl.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/curl-src/configure`,
-				`--prefix=/usr`,
-				`--disable-static`,
-				`--enable-threaded-resolver`,
-				`--with-ca-path=/etc/ssl/certs`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("curl"),
-		Deps(
-			libc.Pkg(d),
-			openssl.Pkg(d),
-			zlib.Pkg(d),
-			cacerts.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) curl.Pkg {
+	return curl.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.M4(),
+				d.Autoconf(),
+				d.OpenSSL(),
+				d.Zlib(),
+				d.CACerts(),
+				d.CurlSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/curl-src/configure`,
+					`--prefix=/usr`,
+					`--disable-static`,
+					`--enable-threaded-resolver`,
+					`--with-ca-path=/etc/ssl/certs`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("curl"),
+			RuntimeDeps(
+				d.Libc(),
+				d.OpenSSL(),
+				d.Zlib(),
+				d.CACerts(),
+			),
+		).With(opts...)
+	})
 }

@@ -35,7 +35,7 @@ func (s StripComponents) ApplyToPkg(p Pkg) Pkg {
 	return PkgValue(stripComponentsKey{}, int(s)).ApplyToPkg(p)
 }
 
-func Curl(distro Executor, opts ...Opt) PkgBuild {
+func Curl(distro Executor, opts ...Opt) Pkg {
 	opt := PkgOf(opts...)
 	url := URLOf(opt)
 	if url == "" {
@@ -49,7 +49,7 @@ func Curl(distro Executor, opts ...Opt) PkgBuild {
 
 	stripComponents := StripComponentsOf(opt)
 
-	return PkgBuildOf(distro.Exec(Shell(
+	return distro.Exec(Shell(
 		`mkdir -p /src`,
 		`cd /src`,
 		fmt.Sprintf("curl -L -O %s", url),
@@ -61,7 +61,7 @@ func Curl(distro Executor, opts ...Opt) PkgBuild {
 	)).With(
 		OutputDir("/src"),
 		MountDir(filepath.Join("/src", name)),
-	).With(opts...))
+	).With(opts...)
 }
 
 type Ref string
@@ -78,7 +78,7 @@ func (r Ref) ApplyToPkg(p Pkg) Pkg {
 	return PkgValue(refKey{}, string(r)).ApplyToPkg(p)
 }
 
-func Git(distro Executor, opts ...Opt) PkgBuild {
+func Git(distro Executor, opts ...Opt) Pkg {
 	opt := PkgOf(opts...)
 	url := URLOf(opt)
 	if url == "" {
@@ -92,7 +92,7 @@ func Git(distro Executor, opts ...Opt) PkgBuild {
 
 	ref := RefOf(opt)
 
-	return PkgBuildOf(distro.Exec(Shell(
+	return distro.Exec(Shell(
 		`mkdir -p /src`,
 		fmt.Sprintf(`git clone --recurse-submodules %s /src`, url),
 		`cd /src`,
@@ -100,5 +100,5 @@ func Git(distro Executor, opts ...Opt) PkgBuild {
 	)).With(
 		OutputDir("/src"),
 		MountDir(filepath.Join("/src", name)),
-	).With(opts...))
+	).With(opts...)
 }

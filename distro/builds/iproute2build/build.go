@@ -28,36 +28,40 @@ func Default(d interface {
 	zlib.Pkger
 	libcap.Pkger
 	elfutils.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		flex.Pkg(d),
-		zlib.Pkg(d),
-		libcap.Pkg(d),
-		elfutils.Pkg(d),
-		Patch(d, iproute2.SrcPkg(d), Shell(
-			`cd /src/iproute2-src`,
-			`sed -i /ARPD/d Makefile`,
-			`rm -fv man/man8/arpd.8`,
-			`sed -i 's/.m_ipt.o//' tc/Makefile`,
-		)).With(DiscardChanges()),
-		Shell(
-			`cd /src/iproute2-src`,
-			`make`,
-			`make DOCDIR=/usr/share/doc/iproute2-5.2.0 install`,
-			`make clean`,
-		),
-	).With(
-		Name("iproute2"),
-		Deps(
-			libc.Pkg(d),
-			zlib.Pkg(d),
-			libcap.Pkg(d),
-			elfutils.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) iproute2.Pkg {
+	return iproute2.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Flex(),
+				d.Zlib(),
+				d.Libcap(),
+				d.Elfutils(),
+				Patch(d, d.IPRoute2Src(), Shell(
+					`cd /src/iproute2-src`,
+					`sed -i /ARPD/d Makefile`,
+					`rm -fv man/man8/arpd.8`,
+					`sed -i 's/.m_ipt.o//' tc/Makefile`,
+				)).With(DiscardChanges()),
+			),
+			Shell(
+				`cd /src/iproute2-src`,
+				`make`,
+				`make DOCDIR=/usr/share/doc/iproute2-5.2.0 install`,
+				`make clean`,
+			),
+		).With(
+			Name("iproute2"),
+			RuntimeDeps(
+				d.Libc(),
+				d.Zlib(),
+				d.Libcap(),
+				d.Elfutils(),
+			),
+		).With(opts...)
+	})
 }

@@ -40,53 +40,57 @@ func Default(d interface {
 	openssl.Pkger
 	xz.Pkger
 	readline.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		zlib.Pkg(d),
-		bzip2.Pkg(d),
-		libffi.Pkg(d),
-		ncurses.Pkg(d),
-		gdbm.Pkg(d),
-		expat.Pkg(d),
-		openssl.Pkg(d),
-		xz.Pkg(d),
-		readline.Pkg(d),
-		python3.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/python3-src/configure`,
-				`--prefix=/usr`,
-				`--enable-shared`,
-				`--with-system-expat`,
-				`--with-system-ffi`,
-				`--with-ensurepip=yes`,
-			}, " "),
-			`make`,
-			`make install`,
-			`chmod -v 755 /usr/lib/libpython3.7m.so`,
-			`chmod -v 755 /usr/lib/libpython3.so`,
-			`ln -sfv pip3.7 /usr/bin/pip3`,
-		),
-	).With(
-		Name("python3"),
-		Deps(
-			libc.Pkg(d),
-			zlib.Pkg(d),
-			bzip2.Pkg(d),
-			libffi.Pkg(d),
-			ncurses.Pkg(d),
-			gdbm.Pkg(d),
-			expat.Pkg(d),
-			openssl.Pkg(d),
-			xz.Pkg(d),
-			readline.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) python3.Pkg {
+	return python3.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Zlib(),
+				d.Bzip2(),
+				d.Libffi(),
+				d.Ncurses(),
+				d.GDBM(),
+				d.Expat(),
+				d.OpenSSL(),
+				d.Xz(),
+				d.Readline(),
+				d.Python3Src(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/python3-src/configure`,
+					`--prefix=/usr`,
+					`--enable-shared`,
+					`--with-system-expat`,
+					`--with-system-ffi`,
+					`--with-ensurepip=yes`,
+				}, " "),
+				`make`,
+				`make install`,
+				`chmod -v 755 /usr/lib/libpython3.7m.so`,
+				`chmod -v 755 /usr/lib/libpython3.so`,
+				`ln -sfv pip3.7 /usr/bin/pip3`,
+			),
+		).With(
+			Name("python3"),
+			RuntimeDeps(
+				d.Libc(),
+				d.Zlib(),
+				d.Bzip2(),
+				d.Libffi(),
+				d.Ncurses(),
+				d.GDBM(),
+				d.Expat(),
+				d.OpenSSL(),
+				d.Xz(),
+				d.Readline(),
+			),
+		).With(opts...)
+	})
 }

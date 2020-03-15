@@ -16,22 +16,7 @@ type Executor interface {
 }
 
 type PkgCache interface {
-	PkgOnce(interface{}, func() PkgBuild) Pkg
-}
-
-// PkgBuild hides a Pkg from callers outside this (golang)
-// package, forcing them to access it through a PkgCache.
-// This forces cached Pkg objects to be used instead of
-// giving callers the option of doing a depth-first walk through
-// the entire graph, re-evaluating each vertex along the way,
-// which becomes a genuine performance concern in terms of
-// memory+CPU usage at realistic scales.
-type PkgBuild struct {
-	pkg Pkg
-}
-
-func PkgBuildOf(p Pkg) PkgBuild {
-	return PkgBuild{p}
+	PkgOnce(interface{}, func() Pkg) Pkg
 }
 
 type Pkger interface {
@@ -48,9 +33,6 @@ func DefaultPkger(bootstrap ...llb.RunOption) Pkger {
 
 type Graph interface {
 	Roots() []Pkg
-	// TODO this really shouldn't be here.
-	// you should really use BuildDeps(...Graph) Opt
-	llb.RunOption
 }
 
 func EmptyGraph() Graph {
@@ -99,11 +81,11 @@ type pkger struct {
 	bootstrap []llb.RunOption
 }
 
-func (pkgr pkger) PkgOnce(key interface{}, pb func() PkgBuild) Pkg {
+func (pkgr pkger) PkgOnce(key interface{}, p func() Pkg) Pkg {
 	if existingPkg, ok := pkgr.pkgs[key]; ok {
 		return existingPkg
 	}
-	resolved := pb().pkg
+	resolved := p()
 	pkgr.pkgs[key] = resolved
 	return resolved
 }
@@ -226,7 +208,7 @@ func ID(p Pkg) string {
 		panic(err)
 	}
 
-	for _, dep := range DepsOf(p).Roots() {
+	for _, dep := range RuntimeDepsOf(p).Roots() {
 		_, err = hasher.Write([]byte(dep.ID()))
 		if err != nil {
 			panic(err)
@@ -262,7 +244,7 @@ func Walk(g Graph, f func(Pkg) error) error {
 			default:
 				return err
 			case nil:
-				for _, dep := range DepsOf(curPkg).Roots() {
+				for _, dep := range RuntimeDepsOf(curPkg).Roots() {
 					newPkgs[dep.ID()] = dep
 				}
 			}
@@ -415,7 +397,7 @@ func Transform(g Graph, opts ...Opt) Graph {
 
 				var newDeps []Graph
 				allDepsFinal := true
-				for _, curDep := range DepsOf(curPkg).Roots() {
+				for _, curDep := range RuntimeDepsOf(curPkg).Roots() {
 					if newDep, ok := oldIDToNewPkg[curDep.ID()]; ok {
 						curDep = newDep
 					}
@@ -458,7 +440,7 @@ func Tsort(g Graph) []Pkg {
 			return SkipPkg()
 		}
 		visited[id] = true
-		for _, dep := range DepsOf(p).Roots() {
+		for _, dep := range RuntimeDepsOf(p).Roots() {
 			inEdgeCount[dep.ID()] += 1
 		}
 		return nil
@@ -474,7 +456,7 @@ func Tsort(g Graph) []Pkg {
 		depPkgs := make(map[string]Pkg)
 		for _, curPkg := range curPkgs {
 			sorted = append(sorted, curPkg)
-			for _, dep := range DepsOf(curPkg).Roots() {
+			for _, dep := range RuntimeDepsOf(curPkg).Roots() {
 				depPkgs[dep.ID()] = dep
 				inEdgeCount[dep.ID()] -= 1
 			}
@@ -561,10 +543,6 @@ func (p pkg) Roots() []Pkg {
 	return p.asGraph().Roots()
 }
 
-func (p pkg) SetRunOption(ei *llb.ExecInfo) {
-	p.asGraph().SetRunOption(ei)
-}
-
 type graph struct {
 	lazy     func() Graph
 	resolved bool
@@ -585,10 +563,6 @@ func (g *graph) Roots() []Pkg {
 		g.roots = g.lazy().Roots()
 	}
 	return g.roots
-}
-
-func (g *graph) SetRunOption(ei *llb.ExecInfo) {
-	ei.State = Import(ei.State).With(BuildDeps(g)).State()
 }
 
 func State(s llb.State) Opt {
@@ -613,7 +587,7 @@ func AtRuntime(opts ...Opt) llb.RunOption {
 
 type depsKey struct{}
 
-func DepsOf(p Pkg) Graph {
+func RuntimeDepsOf(p Pkg) Graph {
 	deps, ok := PkgValueOf(p, depsKey{}).(Graph)
 	if !ok {
 		return EmptyGraph()
@@ -621,9 +595,9 @@ func DepsOf(p Pkg) Graph {
 	return deps
 }
 
-func Deps(graphs ...Graph) Opt {
+func RuntimeDeps(graphs ...Graph) Opt {
 	return OptFunc(func(p Pkg) Pkg {
-		return ResetDeps(append(graphs, DepsOf(p))...).ApplyToPkg(p)
+		return ResetDeps(append(graphs, RuntimeDepsOf(p))...).ApplyToPkg(p)
 	})
 }
 
@@ -655,7 +629,7 @@ func TrimGraphs(g Graph, trimGraphs ...Graph) Graph {
 			}
 
 			var newDeps []Graph
-			for _, dep := range DepsOf(p).Roots() {
+			for _, dep := range RuntimeDepsOf(p).Roots() {
 				if !trimIDs[dep.ID()] {
 					newDeps = append(newDeps, dep)
 				}
@@ -675,14 +649,16 @@ func BuildDepsOf(p Pkg) Graph {
 	return buildDeps
 }
 
-func BuildDeps(graphs ...Graph) Opt {
-	return OptFunc(func(p Pkg) Pkg {
-		if len(graphs) == 0 {
-			return p
-		}
-		return p.With(PkgValue(buildDepsKey{},
-			Merge(BuildDepsOf(p), Merge(graphs...)),
-		))
+func BuildDeps(graphs ...Graph) llb.RunOption {
+	return RunOptionFunc(func (ei *llb.ExecInfo) {
+		ei.State = Import(ei.State).With(OptFunc(func(p Pkg) Pkg {
+			if len(graphs) == 0 {
+				return p
+			}
+			return p.With(PkgValue(buildDepsKey{},
+				Merge(BuildDepsOf(p), Merge(graphs...)),
+			))
+		})).State()
 	})
 }
 
@@ -757,14 +733,14 @@ func (n Name) ApplyToPkg(p Pkg) Pkg {
 // builds of the tmp system, need a better way
 func DepOnlyPkg(depGraphs ...Graph) Pkg {
 	return DefaultPkger().Exec(
-		Merge(depGraphs...),
+		BuildDeps(Merge(depGraphs...)),
 		llb.Args([]string{"/bin/bash", "--version"}),
 	)
 }
 
 func Patch(d Executor, p Pkg, runOpts ...llb.RunOption) Pkg {
-	return d.Exec(append(runOpts, p)...).With(
-		Deps(p),
+	return d.Exec(append(runOpts, BuildDeps(p))...).With(
+		RuntimeDeps(p),
 		// TODO need some more generic way of inheriting PkgValues
 		MountDir(MountDirOf(p)),
 		OutputDir(MountDirOf(p)),

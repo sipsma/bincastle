@@ -22,27 +22,31 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	pkgconfig.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		groff.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`PAGE=letter`,
-				`/src/groff-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make -j1`,
-			`make install`,
-		),
-	).With(
-		Name("groff"),
-		Deps(libc.Pkg(d), gcc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) groff.Pkg {
+	return groff.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.GroffSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`PAGE=letter`,
+					`/src/groff-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make -j1`,
+				`make install`,
+			),
+		).With(
+			Name("groff"),
+			RuntimeDeps(d.Libc(), d.GCC()),
+		).With(opts...)
+	})
 }

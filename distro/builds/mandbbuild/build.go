@@ -32,45 +32,49 @@ func Default(d interface {
 	gdbm.Pkger
 	libpipeline.Pkger
 	groff.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		flex.Pkg(d),
-		zlib.Pkg(d),
-		gdbm.Pkg(d),
-		libpipeline.Pkg(d),
-		groff.Pkg(d),
-		mandb.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/mandb-src/configure`,
-				`--prefix=/usr`,
-				`--docdir=/usr/share/doc/man-db-2.8.6.1`,
-				`--sysconfdir=/etc`,
-				`--disable-setuid`,
-				`--enable-cache-owner=bin`,
-				`--with-browser=/usr/bin/lynx`,
-				`--with-vgrind=/usr/bin/vgrind`,
-				`--with-grap=/usr/bin/grap`,
-				`--with-systemdtmpfilesdir=`,
-				`--with-systemdsystemunitdir=`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("mandb"),
-		Deps(
-			libc.Pkg(d),
-			zlib.Pkg(d),
-			gdbm.Pkg(d),
-			libpipeline.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) mandb.Pkg {
+	return mandb.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Flex(),
+				d.Zlib(),
+				d.GDBM(),
+				d.Libpipeline(),
+				d.Groff(),
+				d.ManDBSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/mandb-src/configure`,
+					`--prefix=/usr`,
+					`--docdir=/usr/share/doc/man-db-2.8.6.1`,
+					`--sysconfdir=/etc`,
+					`--disable-setuid`,
+					`--enable-cache-owner=bin`,
+					`--with-browser=/usr/bin/lynx`,
+					`--with-vgrind=/usr/bin/vgrind`,
+					`--with-grap=/usr/bin/grap`,
+					`--with-systemdtmpfilesdir=`,
+					`--with-systemdsystemunitdir=`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("mandb"),
+			RuntimeDeps(
+				d.Libc(),
+				d.Zlib(),
+				d.GDBM(),
+				d.Libpipeline(),
+			),
+		).With(opts...)
+	})
 }

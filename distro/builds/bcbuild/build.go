@@ -16,26 +16,30 @@ func Default(d interface {
 	bc.Srcer
 	libc.Pkger
 	linux.HeadersPkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		bc.SrcPkg(d).With(DiscardChanges()),
-		Shell(
-			`cd /src/bc-src`,
-			strings.Join([]string{
-				`PREFIX=/usr`,
-				`CC=gcc`,
-				`CFLAGS="-std=c99"`,
-				`./configure.sh`,
-				`-G`,
-				`-O3`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("bc"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) bc.Pkg {
+	return bc.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.BCSrc().With(DiscardChanges()),
+			),
+			Shell(
+				`cd /src/bc-src`,
+				strings.Join([]string{
+					`PREFIX=/usr`,
+					`CC=gcc`,
+					`CFLAGS="-std=c99"`,
+					`./configure.sh`,
+					`-G`,
+					`-O3`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("bc"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

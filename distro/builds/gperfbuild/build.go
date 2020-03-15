@@ -22,27 +22,31 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	pkgconfig.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		gperf.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/gperf-src/configure`,
-				`--prefix=/usr`,
-				`--docdir=/usr/share/doc/gperf-3.1`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("gperf"),
-		Deps(libc.Pkg(d), gcc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) gperf.Pkg {
+	return gperf.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.GperfSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/gperf-src/configure`,
+					`--prefix=/usr`,
+					`--docdir=/usr/share/doc/gperf-3.1`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("gperf"),
+			RuntimeDeps(d.Libc(), d.GCC()),
+		).With(opts...)
+	})
 }

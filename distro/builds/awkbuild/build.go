@@ -30,39 +30,43 @@ func Gawk(d interface {
 	mpfr.Pkger
 	readline.Pkger
 	ncurses.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		gmp.Pkg(d),
-		mpfr.Pkg(d),
-		readline.Pkg(d),
-		ncurses.Pkg(d),
-		Patch(d, awk.SrcPkg(d), Shell(
-			`cd /src/awk-src`,
-			`sed -i 's/extras//' Makefile.in`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/awk-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("gawk"),
-		Deps(
-			libc.Pkg(d),
-			gmp.Pkg(d),
-			mpfr.Pkg(d),
-			readline.Pkg(d),
-			ncurses.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) awk.Pkg {
+	return awk.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.GMP(),
+				d.MPFR(),
+				d.Readline(),
+				d.Ncurses(),
+				Patch(d, d.AwkSrc(), Shell(
+					`cd /src/awk-src`,
+					`sed -i 's/extras//' Makefile.in`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/awk-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("awk"),
+			RuntimeDeps(
+				d.Libc(),
+				d.GMP(),
+				d.MPFR(),
+				d.Readline(),
+				d.Ncurses(),
+			),
+		).With(opts...)
+	})
 }

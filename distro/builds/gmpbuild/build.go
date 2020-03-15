@@ -19,26 +19,30 @@ func Default(d interface {
 	linux.HeadersPkger
 	libc.Pkger
 	binutils.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gmp.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/gmp-src/configure`,
-				`--prefix=/usr`,
-				`--enable-cxx`,
-				`--disable-static`,
-				`--docdir=/usr/share/doc/gmp-6.1.2`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("gmp"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) gmp.Pkg {
+	return gmp.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GMPSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/gmp-src/configure`,
+					`--prefix=/usr`,
+					`--enable-cxx`,
+					`--disable-static`,
+					`--docdir=/usr/share/doc/gmp-6.1.2`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("gmp"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

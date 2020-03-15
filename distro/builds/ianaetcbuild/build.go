@@ -10,15 +10,19 @@ func Default(d interface {
 	PkgCache
 	Executor
 	ianaetc.Srcer
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		ianaetc.SrcPkg(d),
-		Shell(
-			`cd /src/ianaetc-src`,
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("iana-etc"),
-	).With(opts...))
+}, opts ...Opt) ianaetc.Pkg {
+	return ianaetc.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.IanaetcSrc(),
+			),
+			Shell(
+				`cd /src/ianaetc-src`,
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("iana-etc"),
+		).With(opts...)
+	})
 }

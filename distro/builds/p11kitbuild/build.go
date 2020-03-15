@@ -30,43 +30,47 @@ func Default(d interface {
 	automake.Pkger
 	libffi.Pkger
 	libtasn1.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		m4.Pkg(d),
-		automake.Pkg(d),
-		libffi.Pkg(d),
-		libtasn1.Pkg(d),
-		Patch(d, p11kit.SrcPkg(d), Shell(
-			`cd /src/p11kit-src`,
-			`sed '20,$ d' -i trust/trust-extract-compat.in`,
-			`echo '/usr/libexec/make-ca/copy-trust-modifications' >> trust/trust-extract-compat.in`,
-			`echo '/usr/sbin/make-ca -f -g' >> trust/trust-extract-compat.in`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/p11kit-src/configure`,
-				`--prefix=/usr`,
-				`--sysconfdir=/etc`,
-				`--with-trust-paths=/etc/pki/anchors`,
-			}, " "),
-			`make`,
-			`make install`,
-			`ln -sfv /usr/libexec/p11-kit/trust-extract-compat /usr/bin/update-ca-certificates`,
-			`ln -sfv ./pkcs11/p11-kit-trust.so /usr/lib/libnssckbi.so`,
-		),
-	).With(
-		Name("p11kit"),
-		Deps(
-			libc.Pkg(d),
-			libffi.Pkg(d),
-			libtasn1.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) p11kit.Pkg {
+	return p11kit.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.M4(),
+				d.Automake(),
+				d.Libffi(),
+				d.Libtasn1(),
+				Patch(d, d.P11kitSrc(), Shell(
+					`cd /src/p11kit-src`,
+					`sed '20,$ d' -i trust/trust-extract-compat.in`,
+					`echo '/usr/libexec/make-ca/copy-trust-modifications' >> trust/trust-extract-compat.in`,
+					`echo '/usr/sbin/make-ca -f -g' >> trust/trust-extract-compat.in`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/p11kit-src/configure`,
+					`--prefix=/usr`,
+					`--sysconfdir=/etc`,
+					`--with-trust-paths=/etc/pki/anchors`,
+				}, " "),
+				`make`,
+				`make install`,
+				`ln -sfv /usr/libexec/p11-kit/trust-extract-compat /usr/bin/update-ca-certificates`,
+				`ln -sfv ./pkcs11/p11-kit-trust.so /usr/lib/libnssckbi.so`,
+			),
+		).With(
+			Name("p11kit"),
+			RuntimeDeps(
+				d.Libc(),
+				d.Libffi(),
+				d.Libtasn1(),
+			),
+		).With(opts...)
+	})
 }

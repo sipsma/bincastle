@@ -22,29 +22,33 @@ func Default(d interface {
 	binutils.Pkger
 	gcc.Pkger
 	perl5.XMLParserPkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		perl5.XMLParserPkg(d),
-		Patch(d, intltool.SrcPkg(d), Shell(
-			`cd /src/intltool-src`,
-			`sed -i 's:\\\${:\\\$\\{:' intltool-update.in`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/intltool-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("intltool"),
-		Deps(libc.Pkg(d), perl5.XMLParserPkg(d)),
-	).With(opts...))
+}, opts ...Opt) intltool.Pkg {
+	return intltool.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.Perl5XMLParser(),
+				Patch(d, d.IntltoolSrc(), Shell(
+					`cd /src/intltool-src`,
+					`sed -i 's:\\\${:\\\$\\{:' intltool-update.in`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/intltool-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("intltool"),
+			RuntimeDeps(d.Libc(), d.Perl5XMLParser()),
+		).With(opts...)
+	})
 }

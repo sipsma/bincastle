@@ -26,34 +26,38 @@ func Default(d interface {
 	pkgconfig.Pkger
 	readline.Pkger
 	ncurses.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		readline.Pkg(d),
-		ncurses.Pkg(d),
-		gdbm.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/gdbm-src/configure`,
-				`--prefix=/usr`,
-				`--disable-static`,
-				`--enable-libgdbm-compat`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("gdbm"),
-		Deps(
-			libc.Pkg(d),
-			readline.Pkg(d),
-			ncurses.Pkg(d),
-		),
-	).With(opts...))
+}, opts ...Opt) gdbm.Pkg {
+	return gdbm.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Readline(),
+				d.Ncurses(),
+				d.GDBMSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/gdbm-src/configure`,
+					`--prefix=/usr`,
+					`--disable-static`,
+					`--enable-libgdbm-compat`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("gdbm"),
+			RuntimeDeps(
+				d.Libc(),
+				d.Readline(),
+				d.Ncurses(),
+			),
+		).With(opts...)
+	})
 }

@@ -11,6 +11,7 @@ import (
 	. "github.com/sipsma/bincastle/util"
 
 	"github.com/sipsma/bincastle/distro/builds/aclbuild"
+	"github.com/sipsma/bincastle/distro/builds/emacsbuild"
 	"github.com/sipsma/bincastle/distro/builds/attrbuild"
 	"github.com/sipsma/bincastle/distro/builds/autoconfbuild"
 	"github.com/sipsma/bincastle/distro/builds/automakebuild"
@@ -80,6 +81,7 @@ import (
 	"github.com/sipsma/bincastle/distro/builds/zlibbuild"
 	"github.com/sipsma/bincastle/distro/pkgs/acl"
 	"github.com/sipsma/bincastle/distro/pkgs/attr"
+	"github.com/sipsma/bincastle/distro/pkgs/emacs"
 	"github.com/sipsma/bincastle/distro/pkgs/autoconf"
 	"github.com/sipsma/bincastle/distro/pkgs/automake"
 	"github.com/sipsma/bincastle/distro/pkgs/awk"
@@ -146,6 +148,7 @@ import (
 	"github.com/sipsma/bincastle/distro/pkgs/utillinux"
 	"github.com/sipsma/bincastle/distro/pkgs/xz"
 	"github.com/sipsma/bincastle/distro/pkgs/zlib"
+	"github.com/sipsma/bincastle/distro/pkgs/p11kit"
 )
 
 type stage1Distro struct {
@@ -153,92 +156,98 @@ type stage1Distro struct {
 	distroSources
 }
 
-func (d stage1Distro) Binutils() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		binutils.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/binutils-src/configure`,
-				`--prefix=/tools`,
-				`--with-sysroot=/sysroot`,
-				`--with-lib-path=/tools/lib`,
-				`--target=x86_64-bincastle-linux-gnu`,
-				`--disable-nls`,
-				`--disable-werror`,
-			}, ` `),
-			`make`,
-			`mkdir -v /tools/lib`,
-			`ln -sv lib /tools/lib64`,
-			`make install`,
-		),
-	).With(
-		Name("binutils-stage1"),
-	))
+func (d stage1Distro) Binutils() binutils.Pkg {
+	return binutils.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.BinutilsSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/binutils-src/configure`,
+					`--prefix=/tools`,
+					`--with-sysroot=/sysroot`,
+					`--with-lib-path=/tools/lib`,
+					`--target=x86_64-bincastle-linux-gnu`,
+					`--disable-nls`,
+					`--disable-werror`,
+				}, ` `),
+				`make`,
+				`mkdir -v /tools/lib`,
+				`ln -sv lib /tools/lib64`,
+				`make install`,
+			),
+		).With(
+			Name("binutils-stage1"),
+		)
+	})
 }
 
-func (d stage1Distro) GCC() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		binutils.Pkg(d),
-		Patch(d, gcc.SrcPkg(d), Shell(
-			// TODO way of not having to hardcode "gcc-src" here.
-			// Maybe have each Src pkg automatically AddEnv w/
-			// the directory it's located at set to $<pkgname>_SRC_DIR or something
-			`cd /src/gcc-src`,
-			`for file in gcc/config/{linux,i386/linux{,64}}.h`,
-			`do`,
-			`cp -uv $file{,.orig}`,
-			`sed -e 's@/lib\(64\)\?\(32\)\?/ld@/tools&@g' -e 's@/usr@/tools@g' $file.orig > $file`,
-			`echo '' >> $file`,
-			`echo '#undef STANDARD_STARTFILE_PREFIX_1' >> $file`,
-			`echo '#undef STANDARD_STARTFILE_PREFIX_2' >> $file`,
-			`echo '#define STANDARD_STARTFILE_PREFIX_1 "/tools/lib/"' >> $file`,
-			`echo '#define STANDARD_STARTFILE_PREFIX_2 ""' >> $file`,
-			`touch $file.orig`,
-			`done`,
-			`sed -e '/m64=/s/lib64/lib/' -i.orig gcc/config/i386/t-linux64`,
-			// TODO use Mountdir instead of linking here
-			`ln -s /src/mpfr-src /src/gcc-src/mpfr`,
-			`ln -s /src/gmp-src /src/gcc-src/gmp`,
-			`ln -s /src/mpc-src /src/gcc-src/mpc`,
-		)),
-		mpfr.SrcPkg(d),
-		gmp.SrcPkg(d),
-		mpc.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/gcc-src/configure`,
-				`--target=x86_64-bincastle-linux-gnu`,
-				`--prefix=/tools`,
-				`--with-glibc-version=2.11`,
-				`--with-sysroot=/sysroot`,
-				`--with-newlib`,
-				`--without-headers`,
-				`--with-local-prefix=/tools`,
-				`--with-native-system-header-dir=/tools/include`,
-				`--disable-nls`,
-				`--disable-shared`,
-				`--disable-multilib`,
-				`--disable-decimal-float`,
-				`--disable-threads`,
-				`--disable-libatomic`,
-				`--disable-libgomp`,
-				`--disable-libquadmath`,
-				`--disable-libssp`,
-				`--disable-libvtv`,
-				`--disable-libstdcxx`,
-				`--enable-languages=c,c++`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-		// TODO remove
-		AtRuntime(Name("gcc-stage1")),
-	).With(
-		Name("gcc-stage1"),
-		Deps(binutils.Pkg(d)),
-	))
+func (d stage1Distro) GCC() gcc.Pkg {
+	return gcc.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.Binutils(),
+				Patch(d, d.GCCSrc(), Shell(
+					// TODO way of not having to hardcode "gcc-src" here.
+					// Maybe have each Src pkg automatically AddEnv w/
+					// the directory it's located at set to $<pkgname>_SRC_DIR or something
+					`cd /src/gcc-src`,
+					`for file in gcc/config/{linux,i386/linux{,64}}.h`,
+					`do`,
+					`cp -uv $file{,.orig}`,
+					`sed -e 's@/lib\(64\)\?\(32\)\?/ld@/tools&@g' -e 's@/usr@/tools@g' $file.orig > $file`,
+					`echo '' >> $file`,
+					`echo '#undef STANDARD_STARTFILE_PREFIX_1' >> $file`,
+					`echo '#undef STANDARD_STARTFILE_PREFIX_2' >> $file`,
+					`echo '#define STANDARD_STARTFILE_PREFIX_1 "/tools/lib/"' >> $file`,
+					`echo '#define STANDARD_STARTFILE_PREFIX_2 ""' >> $file`,
+					`touch $file.orig`,
+					`done`,
+					`sed -e '/m64=/s/lib64/lib/' -i.orig gcc/config/i386/t-linux64`,
+					// TODO use Mountdir instead of linking here
+					`ln -s /src/mpfr-src /src/gcc-src/mpfr`,
+					`ln -s /src/gmp-src /src/gcc-src/gmp`,
+					`ln -s /src/mpc-src /src/gcc-src/mpc`,
+				)),
+				d.MPFRSrc(),
+				d.GMPSrc(),
+				d.MPCSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/gcc-src/configure`,
+					`--target=x86_64-bincastle-linux-gnu`,
+					`--prefix=/tools`,
+					`--with-glibc-version=2.11`,
+					`--with-sysroot=/sysroot`,
+					`--with-newlib`,
+					`--without-headers`,
+					`--with-local-prefix=/tools`,
+					`--with-native-system-header-dir=/tools/include`,
+					`--disable-nls`,
+					`--disable-shared`,
+					`--disable-multilib`,
+					`--disable-decimal-float`,
+					`--disable-threads`,
+					`--disable-libatomic`,
+					`--disable-libgomp`,
+					`--disable-libquadmath`,
+					`--disable-libssp`,
+					`--disable-libvtv`,
+					`--disable-libstdcxx`,
+					`--enable-languages=c,c++`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("gcc-stage1"),
+			RuntimeDeps(d.Binutils()),
+		)
+	})
 }
 
 type stage2Distro struct {
@@ -246,668 +255,772 @@ type stage2Distro struct {
 	distroSources
 }
 
-func (d stage2Distro) LinuxHeaders() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		Patch(d, linux.SrcPkg(d), Shell(
-			`cd /src/linux-src`,
-			`make mrproper`,
-		)).With(DiscardChanges()),
-		Shell(
-			`cd /src/linux-src`,
-			`make INSTALL_HDR_PATH=/tools headers_install`,
-		),
-	).With(
-		Name("linux-headers-stage2"),
-	))
+func (d stage2Distro) LinuxHeaders() linux.HeadersPkg {
+	return linux.BuildHeadersPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				Patch(d, d.LinuxSrc(), Shell(
+					`cd /src/linux-src`,
+					`make mrproper`,
+				)).With(DiscardChanges()),
+			),
+			Shell(
+				`cd /src/linux-src`,
+				`make INSTALL_HDR_PATH=/tools headers_install`,
+			),
+		).With(
+			Name("linux-headers-stage2"),
+		)
+	})
 }
 
-func (d stage2Distro) Libc() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		libc.SrcPkg(d),
-		linux.HeadersPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/libc-src/configure`,
-				`--prefix=/tools`,
-				`--host=x86_64-bincastle-linux-gnu`,
-				`--build=$(/src/libc-src/scripts/config.guess)`,
-				`--enable-kernel=3.2`,
-				`--with-headers=/tools/include`,
-			}, ` `),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("libc-stage2"),
-	))
+func (d stage2Distro) Libc() libc.Pkg {
+	return libc.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LibcSrc(),
+				d.LinuxHeaders(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/libc-src/configure`,
+					`--prefix=/tools`,
+					`--host=x86_64-bincastle-linux-gnu`,
+					`--build=$(/src/libc-src/scripts/config.guess)`,
+					`--enable-kernel=3.2`,
+					`--with-headers=/tools/include`,
+				}, ` `),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("libc-stage2"),
+		)
+	})
 }
 
-func (d stage2Distro) Libstdcpp() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		libstdcpp.SrcPkg(d),
-		libc.Pkg(d),
-		linux.HeadersPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			`set -x`,
-			`env`,
-			`echo 'int main(){}' > dummy.c`,
-			`x86_64-bincastle-linux-gnu-gcc dummy.c`,
-			`readelf -l a.out | grep ': /tools'`,
-			strings.Join([]string{`/src/gcc-src/libstdc++-v3/configure`,
-				`--host=x86_64-bincastle-linux-gnu`,
-				`--prefix=/tools`,
-				`--disable-multilib`,
-				`--disable-nls`,
-				`--disable-libstdcxx-threads`,
-				`--disable-libstdcxx-pch`,
-				`--with-gxx-include-dir=/tools/x86_64-bincastle-linux-gnu/include/c++/9.2.0`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("libstdcpp-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Libstdcpp() libstdcpp.Pkg {
+	return libstdcpp.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LibstdcppSrc(),
+				d.Libc(),
+				d.LinuxHeaders(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				`set -x`,
+				`env`,
+				`echo 'int main(){}' > dummy.c`,
+				`x86_64-bincastle-linux-gnu-gcc dummy.c`,
+				`readelf -l a.out | grep ': /tools'`,
+				strings.Join([]string{`/src/gcc-src/libstdc++-v3/configure`,
+					`--host=x86_64-bincastle-linux-gnu`,
+					`--prefix=/tools`,
+					`--disable-multilib`,
+					`--disable-nls`,
+					`--disable-libstdcxx-threads`,
+					`--disable-libstdcxx-pch`,
+					`--with-gxx-include-dir=/tools/x86_64-bincastle-linux-gnu/include/c++/9.2.0`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("libstdcpp-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Binutils() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		binutils.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		libstdcpp.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`CC=x86_64-bincastle-linux-gnu-gcc`,
-				`AR=x86_64-bincastle-linux-gnu-ar`,
-				`RANLIB=x86_64-bincastle-linux-gnu-ranlib`,
-				`/src/binutils-src/configure`,
-				`--prefix=/tools`,
-				`--disable-nls`,
-				`--disable-werror`,
-				`--with-lib-path=/tools/lib`,
-				`--with-sysroot`,
-			}, " "),
-			`make`,
-			`make install`,
-			`make -C ld clean`,
-			`make -C ld LIB_PATH=/usr/lib:/lib`,
-			`cp -v ld/ld-new /tools/bin`,
-		),
-	).With(
-		Name("binutils-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Binutils() binutils.Pkg {
+	return binutils.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.BinutilsSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Libstdcpp(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`CC=x86_64-bincastle-linux-gnu-gcc`,
+					`AR=x86_64-bincastle-linux-gnu-ar`,
+					`RANLIB=x86_64-bincastle-linux-gnu-ranlib`,
+					`/src/binutils-src/configure`,
+					`--prefix=/tools`,
+					`--disable-nls`,
+					`--disable-werror`,
+					`--with-lib-path=/tools/lib`,
+					`--with-sysroot`,
+				}, " "),
+				`make`,
+				`make install`,
+				`make -C ld clean`,
+				`make -C ld LIB_PATH=/usr/lib:/lib`,
+				`cp -v ld/ld-new /tools/bin`,
+			),
+		).With(
+			Name("binutils-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) GCC() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		Patch(d, gcc.SrcPkg(d), Shell(
-			// TODO way of not having to hardcode "gcc-src" here.
-			// Maybe have each Src pkg automatically AddEnv w/
-			// the directory it's located at set to $<pkgname>_SRC_DIR or something
-			`cd /src/gcc-src`,
-			`for file in gcc/config/{linux,i386/linux{,64}}.h`,
-			`do`,
-			`cp -uv $file{,.orig}`,
-			`sed -e 's@/lib\(64\)\?\(32\)\?/ld@/tools&@g' -e 's@/usr@/tools@g' $file.orig > $file`,
-			`echo '' >> $file`,
-			`echo '#undef STANDARD_STARTFILE_PREFIX_1' >> $file`,
-			`echo '#undef STANDARD_STARTFILE_PREFIX_2' >> $file`,
-			`echo '#define STANDARD_STARTFILE_PREFIX_1 "/tools/lib/"' >> $file`,
-			`echo '#define STANDARD_STARTFILE_PREFIX_2 ""' >> $file`,
-			`touch $file.orig`,
-			`done`,
-			`sed -e '/m64=/s/lib64/lib/' -i.orig gcc/config/i386/t-linux64`,
-			`ln -s /src/mpfr-src /src/gcc-src/mpfr`,
-			`ln -s /src/gmp-src /src/gcc-src/gmp`,
-			`ln -s /src/mpc-src /src/gcc-src/mpc`,
-		)),
-		mpfr.SrcPkg(d),
-		gmp.SrcPkg(d),
-		mpc.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		libstdcpp.Pkg(d),
-		binutils.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /src/gcc-src`,
-			"cat gcc/limitx.h gcc/glimits.h gcc/limity.h > `dirname $(x86_64-bincastle-linux-gnu-gcc -print-libgcc-file-name)`/include-fixed/limits.h",
-			`cd /build`,
-			strings.Join([]string{
-				`CC=x86_64-bincastle-linux-gnu-gcc`,
-				`CXX=x86_64-bincastle-linux-gnu-g++`,
-				`AR=x86_64-bincastle-linux-gnu-ar`,
-				`RANLIB=x86_64-bincastle-linux-gnu-ranlib`,
-				`/src/gcc-src/configure`,
-				`--prefix=/tools`,
-				`--with-local-prefix=/tools`,
-				`--with-native-system-header-dir=/tools/include`,
-				`--enable-languages=c,c++`,
-				`--disable-libstdcxx-pch`,
-				`--disable-multilib`,
-				`--disable-bootstrap`,
-				`--disable-libgomp`,
-			}, " "),
-			`make`,
-			`make install`,
-			`ln -sv gcc /tools/bin/cc`,
-		),
-	).With(
-		Name("gcc-stage2"),
-		Deps(
-			libc.Pkg(d),
-			libstdcpp.Pkg(d),
-			binutils.Pkg(d),
-		),
-	))
+func (d stage2Distro) GCC() gcc.Pkg {
+	return gcc.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				Patch(d, d.GCCSrc(), Shell(
+					// TODO way of not having to hardcode "gcc-src" here.
+					// Maybe have each Src pkg automatically AddEnv w/
+					// the directory it's located at set to $<pkgname>_SRC_DIR or something
+					`cd /src/gcc-src`,
+					`for file in gcc/config/{linux,i386/linux{,64}}.h`,
+					`do`,
+					`cp -uv $file{,.orig}`,
+					`sed -e 's@/lib\(64\)\?\(32\)\?/ld@/tools&@g' -e 's@/usr@/tools@g' $file.orig > $file`,
+					`echo '' >> $file`,
+					`echo '#undef STANDARD_STARTFILE_PREFIX_1' >> $file`,
+					`echo '#undef STANDARD_STARTFILE_PREFIX_2' >> $file`,
+					`echo '#define STANDARD_STARTFILE_PREFIX_1 "/tools/lib/"' >> $file`,
+					`echo '#define STANDARD_STARTFILE_PREFIX_2 ""' >> $file`,
+					`touch $file.orig`,
+					`done`,
+					`sed -e '/m64=/s/lib64/lib/' -i.orig gcc/config/i386/t-linux64`,
+					`ln -s /src/mpfr-src /src/gcc-src/mpfr`,
+					`ln -s /src/gmp-src /src/gcc-src/gmp`,
+					`ln -s /src/mpc-src /src/gcc-src/mpc`,
+				)),
+				d.MPFRSrc(),
+				d.GMPSrc(),
+				d.MPCSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Libstdcpp(),
+				d.Binutils(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /src/gcc-src`,
+				"cat gcc/limitx.h gcc/glimits.h gcc/limity.h > `dirname $(x86_64-bincastle-linux-gnu-gcc -print-libgcc-file-name)`/include-fixed/limits.h",
+				`cd /build`,
+				strings.Join([]string{
+					`CC=x86_64-bincastle-linux-gnu-gcc`,
+					`CXX=x86_64-bincastle-linux-gnu-g++`,
+					`AR=x86_64-bincastle-linux-gnu-ar`,
+					`RANLIB=x86_64-bincastle-linux-gnu-ranlib`,
+					`/src/gcc-src/configure`,
+					`--prefix=/tools`,
+					`--with-local-prefix=/tools`,
+					`--with-native-system-header-dir=/tools/include`,
+					`--enable-languages=c,c++`,
+					`--disable-libstdcxx-pch`,
+					`--disable-multilib`,
+					`--disable-bootstrap`,
+					`--disable-libgomp`,
+				}, " "),
+				`make`,
+				`make install`,
+				`ln -sv gcc /tools/bin/cc`,
+			),
+		).With(
+			Name("gcc-stage2"),
+			RuntimeDeps(
+				d.Libc(),
+				d.Libstdcpp(),
+				d.Binutils(),
+			),
+		)
+	})
 }
 
-func (d stage2Distro) M4() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		Patch(d, m4.SrcPkg(d), Shell(
-			`cd /src/m4-src`,
-			`sed -i 's/IO_ftrylockfile/IO_EOF_SEEN/' lib/*.c`,
-			`echo "#define _IO_IN_BACKUP 0x100" >> lib/stdio-impl.h`,
-		)),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/m4-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("m4-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) M4() m4.Pkg {
+	return m4.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				Patch(d, d.M4Src(), Shell(
+					`cd /src/m4-src`,
+					`sed -i 's/IO_ftrylockfile/IO_EOF_SEEN/' lib/*.c`,
+					`echo "#define _IO_IN_BACKUP 0x100" >> lib/stdio-impl.h`,
+				)),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/m4-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("m4-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Ncurses() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		Patch(d, ncurses.SrcPkg(d), Shell(
-			`cd /src/ncurses-src`,
-			`sed -i s/mawk// configure`,
-		)),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/ncurses-src/configure`,
-				`--prefix=/tools`,
-				`--with-shared`,
-				`--without-debug`,
-				`--without-ada`,
-				`--enable-widec`,
-				`--enable-overwrite`,
-			}, " "),
-			`make`,
-			`make install`,
-			`ln -s libncursesw.so /tools/lib/libncurses.so`,
-		),
-	).With(
-		Name("ncurses-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Ncurses() ncurses.Pkg {
+	return ncurses.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				Patch(d, d.NcursesSrc(), Shell(
+					`cd /src/ncurses-src`,
+					`sed -i s/mawk// configure`,
+				)),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/ncurses-src/configure`,
+					`--prefix=/tools`,
+					`--with-shared`,
+					`--without-debug`,
+					`--without-ada`,
+					`--enable-widec`,
+					`--enable-overwrite`,
+				}, " "),
+				`make`,
+				`make install`,
+				`ln -s libncursesw.so /tools/lib/libncurses.so`,
+			),
+		).With(
+			Name("ncurses-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Bash() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		bash.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/bash-src/configure`,
-				`--prefix=/tools`,
-				`--without-bash-malloc`,
-			}, " "),
-			`make`,
-			`make install`,
-			`ln -sv bash /tools/bin/sh`,
-		),
-	).With(
-		Name("bash-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Bash() bash.Pkg {
+	return bash.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.BashSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/bash-src/configure`,
+					`--prefix=/tools`,
+					`--without-bash-malloc`,
+				}, " "),
+				`make`,
+				`make install`,
+				`ln -sv bash /tools/bin/sh`,
+			),
+		).With(
+			Name("bash-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Bison() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		bison.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/bison-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make -j1`, // TODO
-			`make install`,
-		),
-	).With(
-		Name("bison-stage2"),
-		Deps(libc.Pkg(d), m4.Pkg(d)),
-	))
+func (d stage2Distro) Bison() bison.Pkg {
+	return bison.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.BisonSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/bison-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make -j1`, // TODO
+				`make install`,
+			),
+		).With(
+			Name("bison-stage2"),
+			RuntimeDeps(d.Libc(), d.M4()),
+		)
+	})
 }
 
-func (d stage2Distro) Bzip2() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		bzip2.SrcPkg(d).With(DiscardChanges()),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		Shell(
-			`cd /src/bzip2-src`,
-			`make`,
-			`make PREFIX=/tools install`,
-			`make clean`,
-		),
-	).With(
-		Name("bzip2-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Bzip2() bzip2.Pkg {
+	return bzip2.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.Bzip2Src().With(DiscardChanges()),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			Shell(
+				`cd /src/bzip2-src`,
+				`make`,
+				`make PREFIX=/tools install`,
+				`make clean`,
+			),
+		).With(
+			Name("bzip2-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Coreutils() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		coreutils.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/coreutils-src/configure`,
-				`--prefix=/tools`,
-				`--enable-install-program=hostname`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("coreutils-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Coreutils() coreutils.Pkg {
+	return coreutils.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.CoreutilsSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/coreutils-src/configure`,
+					`--prefix=/tools`,
+					`--enable-install-program=hostname`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("coreutils-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Diffutils() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		diffutils.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/diffutils-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("diffutils-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Diffutils() diffutils.Pkg {
+	return diffutils.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.DiffutilsSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/diffutils-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("diffutils-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) File() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		file.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/file-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("file-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) File() file.Pkg {
+	return file.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.FileSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/file-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("file-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Findutils() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		Patch(d, findutils.SrcPkg(d), Shell(
-			`cd /src/findutils-src`,
-			`sed -i 's/IO_ftrylockfile/IO_EOF_SEEN/' gl/lib/*.c`,
-			`sed -i '/unistd/a #include <sys/sysmacros.h>' gl/lib/mountlist.c`,
-			`echo "#define _IO_IN_BACKUP 0x100" >> gl/lib/stdio-impl.h`,
-		)),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/findutils-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("findutils-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Findutils() findutils.Pkg {
+	return findutils.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				Patch(d, d.FindutilsSrc(), Shell(
+					`cd /src/findutils-src`,
+					`sed -i 's/IO_ftrylockfile/IO_EOF_SEEN/' gl/lib/*.c`,
+					`sed -i '/unistd/a #include <sys/sysmacros.h>' gl/lib/mountlist.c`,
+					`echo "#define _IO_IN_BACKUP 0x100" >> gl/lib/stdio-impl.h`,
+				)),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/findutils-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("findutils-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Awk() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		awk.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/awk-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("awk-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Awk() awk.Pkg {
+	return awk.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.AwkSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/awk-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("awk-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Gettext() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		gettext.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ncurses.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/gettext-src/configure`,
-				`--disable-shared`,
-			}, " "),
-			`make`,
-			`cp -v gettext-tools/src/{msgfmt,msgmerge,xgettext} /tools/bin`,
-		),
-	).With(
-		Name("gettext-stage2"),
-		Deps(libc.Pkg(d), ncurses.Pkg(d)),
-	))
+func (d stage2Distro) Gettext() gettext.Pkg {
+	return gettext.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.GettextSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+				d.Ncurses(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/gettext-src/configure`,
+					`--disable-shared`,
+				}, " "),
+				`make`,
+				`cp -v gettext-tools/src/{msgfmt,msgmerge,xgettext} /tools/bin`,
+			),
+		).With(
+			Name("gettext-stage2"),
+			RuntimeDeps(d.Libc(), d.Ncurses()),
+		)
+	})
 }
 
-func (d stage2Distro) Grep() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		grep.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/grep-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("grep-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Grep() grep.Pkg {
+	return grep.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.GrepSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/grep-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("grep-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Gzip() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		gzip.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/gzip-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("gzip-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Gzip() gzip.Pkg {
+	return gzip.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.GzipSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/gzip-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("gzip-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Make() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		Patch(d, make.SrcPkg(d), Shell(
-			`cd /src/make-src`,
-			`sed -i '211,217 d; 219,229 d; 232 d' glob/glob.c`,
-		)),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/make-src/configure`,
-				`--prefix=/tools`,
-				`--without-guile`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("make-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Make() make.Pkg {
+	return make.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				Patch(d, d.MakeSrc(), Shell(
+					`cd /src/make-src`,
+					`sed -i '211,217 d; 219,229 d; 232 d' glob/glob.c`,
+				)),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/make-src/configure`,
+					`--prefix=/tools`,
+					`--without-guile`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("make-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Patch() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		patch.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/patch-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("patch-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Patch() patch.Pkg {
+	return patch.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.PatchSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/patch-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("patch-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Perl5() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		perl5.SrcPkg(d).With(DiscardChanges()),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		bzip2.Pkg(d),
-		Shell(
-			`cd /src/perl5-src`,
-			strings.Join([]string{`sh`, `Configure`,
-				`-des`,
-				`-Dprefix=/tools`,
-				`-Dlibs=-lm`,
-				`-Uloclibpth`,
-				`-Ulocincpth`,
-			}, " "),
-			`make`,
-			`cp -v perl cpan/podlators/scripts/pod2man /tools/bin`,
-			`mkdir -pv /tools/lib/perl5/5.30.0`,
-			`cp -Rv lib/* /tools/lib/perl5/5.30.0`,
-			`make clean`,
-		),
-	).With(
-		Name("perl5-stage2"),
-		Deps(libc.Pkg(d), bzip2.Pkg(d)),
-	))
+func (d stage2Distro) Perl5() perl5.Pkg {
+	return perl5.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.Perl5Src().With(DiscardChanges()),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+				d.Bzip2(),
+			),
+			Shell(
+				`cd /src/perl5-src`,
+				strings.Join([]string{`sh`, `Configure`,
+					`-des`,
+					`-Dprefix=/tools`,
+					`-Dlibs=-lm`,
+					`-Uloclibpth`,
+					`-Ulocincpth`,
+				}, " "),
+				`make`,
+				`cp -v perl cpan/podlators/scripts/pod2man /tools/bin`,
+				`mkdir -pv /tools/lib/perl5/5.30.0`,
+				`cp -Rv lib/* /tools/lib/perl5/5.30.0`,
+				`make clean`,
+			),
+		).With(
+			Name("perl5-stage2"),
+			RuntimeDeps(d.Libc(), d.Bzip2()),
+		)
+	})
 }
 
-func (d stage2Distro) Python3() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		Patch(d, python3.SrcPkg(d), Shell(
-			`cd /src/python3-src`,
-			`sed -i '/def add_multiarch_paths/a \        return' setup.py`,
-		)),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		bzip2.Pkg(d),
-		ncurses.Pkg(d),
-		file.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/python3-src/configure`,
-				`--prefix=/tools`,
-				`--without-ensurepip`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("python3-stage2"),
-		Deps(libc.Pkg(d), bzip2.Pkg(d), ncurses.Pkg(d), file.Pkg(d)),
-	))
+func (d stage2Distro) Python3() python3.Pkg {
+	return python3.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				Patch(d, d.Python3Src(), Shell(
+					`cd /src/python3-src`,
+					`sed -i '/def add_multiarch_paths/a \        return' setup.py`,
+				)),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+				d.Bzip2(),
+				d.Ncurses(),
+				d.File(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/python3-src/configure`,
+					`--prefix=/tools`,
+					`--without-ensurepip`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("python3-stage2"),
+			RuntimeDeps(d.Libc(), d.Bzip2(), d.Ncurses(), d.File()),
+		)
+	})
 }
 
-func (d stage2Distro) Sed() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		sed.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/sed-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("sed-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Sed() sed.Pkg {
+	return sed.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.SedSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/sed-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("sed-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Tar() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		tar.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/tar-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("tar-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Tar() tar.Pkg {
+	return tar.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.TarSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/tar-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("tar-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
-func (d stage2Distro) Texinfo() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		texinfo.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		perl5.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/texinfo-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("texinfo-stage2"),
-		Deps(libc.Pkg(d), perl5.Pkg(d)),
-	))
+func (d stage2Distro) Texinfo() texinfo.Pkg {
+	return texinfo.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.TexinfoSrc(),
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+				d.Perl5(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/texinfo-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("texinfo-stage2"),
+			RuntimeDeps(d.Libc(), d.Perl5()),
+		)
+	})
 }
 
-func (d stage2Distro) Xz() PkgBuild {
-	return PkgBuildOf(d.Exec(
-		xz.SrcPkg(d),
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		gcc.Pkg(d),
-		m4.Pkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{`/src/xz-src/configure`,
-				`--prefix=/tools`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("xz-stage2"),
-		Deps(libc.Pkg(d)),
-	))
+func (d stage2Distro) Xz() xz.Pkg {
+	return xz.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.GCC(),
+				d.M4(),
+				d.XzSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{`/src/xz-src/configure`,
+					`--prefix=/tools`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("xz-stage2"),
+			RuntimeDeps(d.Libc()),
+		)
+	})
 }
 
 type stage3Distro struct {
@@ -915,11 +1028,11 @@ type stage3Distro struct {
 	distroSources
 }
 
-func (d stage3Distro) LinuxHeaders() PkgBuild {
+func (d stage3Distro) LinuxHeaders() linux.HeadersPkg {
 	return linuxbuild.DefaultHeaders(d)
 }
 
-func (d stage3Distro) Libc() PkgBuild {
+func (d stage3Distro) Libc() libc.Pkg {
 	return libcbuild.DefaultGlibc(d)
 }
 
@@ -929,271 +1042,275 @@ type distro struct {
 	distroSources
 }
 
-func (d distro) Manpages() PkgBuild {
+func (d distro) Manpages() manpages.Pkg {
 	return manpagesbuild.Default(d)
 }
 
-func (d distro) Zlib() PkgBuild {
+func (d distro) Zlib() zlib.Pkg {
 	return zlibbuild.Default(d)
 }
 
-func (d distro) File() PkgBuild {
+func (d distro) File() file.Pkg {
 	return filebuild.Default(d)
 }
 
-func (d distro) Readline() PkgBuild {
+func (d distro) Readline() readline.Pkg {
 	return readlinebuild.Default(d)
 }
 
-func (d distro) M4() PkgBuild {
+func (d distro) M4() m4.Pkg {
 	return m4build.Default(d)
 }
 
-func (d distro) BC() PkgBuild {
+func (d distro) BC() bc.Pkg {
 	return bcbuild.Default(d)
 }
 
-func (d distro) Binutils() PkgBuild {
+func (d distro) Binutils() binutils.Pkg {
 	return binutilsbuild.Default(d)
 }
 
-func (d distro) GMP() PkgBuild {
+func (d distro) GMP() gmp.Pkg {
 	return gmpbuild.Default(d)
 }
 
-func (d distro) MPFR() PkgBuild {
+func (d distro) MPFR() mpfr.Pkg {
 	return mpfrbuild.Default(d)
 }
 
-func (d distro) MPC() PkgBuild {
+func (d distro) MPC() mpc.Pkg {
 	return mpcbuild.Default(d)
 }
 
-func (d distro) GCC() PkgBuild {
+func (d distro) GCC() gcc.Pkg {
 	return gccbuild.Default(d)
 }
 
-func (d distro) Bzip2() PkgBuild {
+func (d distro) Bzip2() bzip2.Pkg {
 	return bzip2build.Default(d)
 }
 
-func (d distro) PkgConfig() PkgBuild {
+func (d distro) PkgConfig() pkgconfig.Pkg {
 	return pkgconfigbuild.Default(d)
 }
 
-func (d distro) Ncurses() PkgBuild {
+func (d distro) Ncurses() ncurses.Pkg {
 	return ncursesbuild.Default(d)
 }
 
-func (d distro) Attr() PkgBuild {
+func (d distro) Attr() attr.Pkg {
 	return attrbuild.Default(d)
 }
 
-func (d distro) Acl() PkgBuild {
+func (d distro) Acl() acl.Pkg {
 	return aclbuild.Default(d)
 }
 
-func (d distro) Libcap() PkgBuild {
+func (d distro) Libcap() libcap.Pkg {
 	return libcapbuild.Default(d)
 }
 
-func (d distro) Sed() PkgBuild {
+func (d distro) Sed() sed.Pkg {
 	return sedbuild.Default(d)
 }
 
-func (d distro) Psmisc() PkgBuild {
+func (d distro) Psmisc() psmisc.Pkg {
 	return psmiscbuild.Default(d)
 }
 
-func (d distro) Ianaetc() PkgBuild {
+func (d distro) Ianaetc() ianaetc.Pkg {
 	return ianaetcbuild.Default(d)
 }
 
-func (d distro) Bison() PkgBuild {
+func (d distro) Bison() bison.Pkg {
 	return bisonbuild.Default(d)
 }
 
-func (d distro) Flex() PkgBuild {
+func (d distro) Flex() flex.Pkg {
 	return flexbuild.Default(d)
 }
 
-func (d distro) Grep() PkgBuild {
+func (d distro) Grep() grep.Pkg {
 	return grepbuild.Default(d)
 }
 
-func (d distro) Bash() PkgBuild {
+func (d distro) Bash() bash.Pkg {
 	return bashbuild.Default(d)
 }
 
-func (d distro) Libtool() PkgBuild {
+func (d distro) Libtool() libtool.Pkg {
 	return libtoolbuild.Default(d)
 }
 
-func (d distro) GDBM() PkgBuild {
+func (d distro) GDBM() gdbm.Pkg {
 	return gdbmbuild.Default(d)
 }
 
-func (d distro) Gperf() PkgBuild {
+func (d distro) Gperf() gperf.Pkg {
 	return gperfbuild.Default(d)
 }
 
-func (d distro) Expat() PkgBuild {
+func (d distro) Expat() expat.Pkg {
 	return expatbuild.Default(d)
 }
 
-func (d distro) Inetutils() PkgBuild {
+func (d distro) Inetutils() inetutils.Pkg {
 	return inetutilsbuild.Default(d)
 }
 
-func (d distro) Perl5() PkgBuild {
+func (d distro) Perl5() perl5.Pkg {
 	return perl5build.Default(d)
 }
 
-func (d distro) Perl5XMLParser() PkgBuild {
+func (d distro) Perl5XMLParser() perl5.XMLParserPkg {
 	return perl5build.DefaultXMLParser(d)
 }
 
-func (d distro) Intltool() PkgBuild {
+func (d distro) Intltool() intltool.Pkg {
 	return intltoolbuild.Default(d)
 }
 
-func (d distro) Autoconf() PkgBuild {
+func (d distro) Autoconf() autoconf.Pkg {
 	return autoconfbuild.Default(d)
 }
 
-func (d distro) Automake() PkgBuild {
+func (d distro) Automake() automake.Pkg {
 	return automakebuild.Default(d)
 }
 
-func (d distro) Xz() PkgBuild {
+func (d distro) Xz() xz.Pkg {
 	return xzbuild.Default(d)
 }
 
-func (d distro) Gettext() PkgBuild {
+func (d distro) Gettext() gettext.Pkg {
 	return gettextbuild.Default(d)
 }
 
-func (d distro) Elfutils() PkgBuild {
+func (d distro) Elfutils() elfutils.Pkg {
 	return elfutilsbuild.Default(d)
 }
 
-func (d distro) Libffi() PkgBuild {
+func (d distro) Libffi() libffi.Pkg {
 	return libffibuild.Default(d)
 }
 
-func (d distro) OpenSSL() PkgBuild {
+func (d distro) OpenSSL() openssl.Pkg {
 	return opensslbuild.Default(d)
 }
 
-func (d distro) Python3() PkgBuild {
+func (d distro) Python3() python3.Pkg {
 	return python3build.Default(d)
 }
 
-func (d distro) Ninja() PkgBuild {
+func (d distro) Ninja() ninja.Pkg {
 	return ninjabuild.Default(d)
 }
 
-func (d distro) Meson() PkgBuild {
+func (d distro) Meson() meson.Pkg {
 	return mesonbuild.Default(d)
 }
 
-func (d distro) Coreutils() PkgBuild {
+func (d distro) Coreutils() coreutils.Pkg {
 	return coreutilsbuild.Default(d)
 }
 
-func (d distro) Diffutils() PkgBuild {
+func (d distro) Diffutils() diffutils.Pkg {
 	return diffutilsbuild.Default(d)
 }
 
-func (d distro) Awk() PkgBuild {
+func (d distro) Awk() awk.Pkg {
 	return awkbuild.Gawk(d)
 }
 
-func (d distro) Findutils() PkgBuild {
+func (d distro) Findutils() findutils.Pkg {
 	return findutilsbuild.Default(d)
 }
 
-func (d distro) Groff() PkgBuild {
+func (d distro) Groff() groff.Pkg {
 	return groffbuild.Default(d)
 }
 
-func (d distro) Less() PkgBuild {
+func (d distro) Less() less.Pkg {
 	return lessbuild.Default(d)
 }
 
-func (d distro) Gzip() PkgBuild {
+func (d distro) Gzip() gzip.Pkg {
 	return gzipbuild.Default(d)
 }
 
-func (d distro) IPRoute2() PkgBuild {
+func (d distro) IPRoute2() iproute2.Pkg {
 	return iproute2build.Default(d)
 }
 
-func (d distro) Kbd() PkgBuild {
+func (d distro) Kbd() kbd.Pkg {
 	return kbdbuild.Default(d)
 }
 
-func (d distro) Libpipeline() PkgBuild {
+func (d distro) Libpipeline() libpipeline.Pkg {
 	return libpipelinebuild.Default(d)
 }
 
-func (d distro) Make() PkgBuild {
+func (d distro) Make() make.Pkg {
 	return makebuild.Default(d)
 }
 
-func (d distro) Patch() PkgBuild {
+func (d distro) Patch() patch.Pkg {
 	return patchbuild.Default(d)
 }
 
-func (d distro) ManDB() PkgBuild {
+func (d distro) ManDB() mandb.Pkg {
 	return mandbbuild.Default(d)
 }
 
-func (d distro) Tar() PkgBuild {
+func (d distro) Tar() tar.Pkg {
 	return tarbuild.Default(d)
 }
 
-func (d distro) Texinfo() PkgBuild {
+func (d distro) Texinfo() texinfo.Pkg {
 	return texinfobuild.Default(d)
 }
 
-func (d distro) Procps() PkgBuild {
+func (d distro) Procps() procps.Pkg {
 	return procpsbuild.Default(d)
 }
 
-func (d distro) UtilLinux() PkgBuild {
+func (d distro) UtilLinux() utillinux.Pkg {
 	return utillinuxbuild.Default(d)
 }
 
-func (d distro) E2fsprogs() PkgBuild {
+func (d distro) E2fsprogs() e2fsprogs.Pkg {
 	return e2fsprogsbuild.Default(d)
 }
 
-func (d distro) Libtasn1() PkgBuild {
+func (d distro) Libtasn1() libtasn1.Pkg {
 	return libtasn1build.Default(d)
 }
 
-func (d distro) P11kit() PkgBuild {
+func (d distro) P11kit() p11kit.Pkg {
 	return p11kitbuild.Default(d)
 }
 
-func (d distro) CACerts() PkgBuild {
+func (d distro) CACerts() cacerts.Pkg {
 	return cacertsbuild.Default(d)
 }
 
-func (d distro) Curl() PkgBuild {
+func (d distro) Curl() curl.Pkg {
 	return curlbuild.Default(d)
 }
 
-func (d distro) Git() PkgBuild {
+func (d distro) Git() git.Pkg {
 	return gitbuild.Default(d)
 }
 
-func (d distro) Golang() PkgBuild {
+func (d distro) Golang() golang.Pkg {
 	return golangbuild.Default(d)
 }
 
-func (d distro) Users() PkgBuild {
+func (d distro) Emacs() emacs.Pkg {
+	return emacsbuild.Default(d)
+}
+
+func (d distro) Users() users.Pkg {
 	return usersbuild.SingleUser(d,
 		// TODO make this customizable by other consumers via a field in distro
 		"sipsma",
@@ -1204,16 +1321,22 @@ func (d distro) Users() PkgBuild {
 
 // TODO hate this name...
 func (d distro) MiscFiles() Pkg {
-	return d.Exec(coreutils.Pkg(d), bash.Pkg(d), Shell(
-		`ln -sv /run /var/run`,
-		`mkdir -pv /var/{opt,cache,lib/{color,misc,locate},local}`,
-		// TODO have to first remove the existing symlinks because
-		// they are also provided in the bootstrap, which is later trimmed.
-		// This is super ugly, you need to find a better way to de-dupe this
-		// with the bootstrap
-		`rm -f /bin/sh && ln -sv bash /bin/sh`,
-		`rm -f /etc/mtab && ln -sv /proc/self/mounts /etc/mtab`,
-	)).With(Deps(bash.Pkg(d)))
+	return d.Exec(
+		BuildDeps(
+			d.Coreutils(),
+			d.Bash(),
+		),
+		Shell(
+			`ln -sv /run /var/run`,
+			`mkdir -pv /var/{opt,cache,lib/{color,misc,locate},local}`,
+			// TODO have to first remove the existing symlinks because
+			// they are also provided in the bootstrap, which is later trimmed.
+			// This is super ugly, you need to find a better way to de-dupe this
+			// with the bootstrap
+			`rm -f /bin/sh && ln -sv bash /bin/sh`,
+			`rm -f /etc/mtab && ln -sv /proc/self/mounts /etc/mtab`,
+		),
+	).With(RuntimeDeps(d.Bash()))
 }
 
 func Bootstrap(bootstrapGraph Graph) Graph {
@@ -1228,29 +1351,29 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 	sources := distroSources{
 		Pkger: DefaultPkger(append(defaultBuildOpts,
 			llb.AddEnv("PATH", "/bin:/usr/bin"),
-			bootstrapGraph,
+			BuildDeps(bootstrapGraph),
 		)...),
 	}
 
 	tmpBaseSystem := DefaultPkger().Exec(
-		bootstrapGraph,
+		BuildDeps(bootstrapGraph),
 		Shell(
 			`ln -sv /sysroot/tools /`,
 			`mkdir -pv /sysroot/tools`,
 		),
-	).With(Deps(bootstrapGraph), Name("tmpBaseSystem"))
+	).With(RuntimeDeps(bootstrapGraph), Name("tmpBaseSystem"))
 
 	stage1 := func(d stage1Distro) Graph {
 		return Merge(
-			binutils.Pkg(d),
-			gcc.Pkg(d),
+			d.Binutils(),
+			d.GCC(),
 		)
 	}(stage1Distro{
 		Pkger: DefaultPkger(append(defaultBuildOpts,
 			llb.AddEnv("PATH", "/tools/bin:/bin:/usr/bin"),
-			tmpBaseSystem,
+			BuildDeps(tmpBaseSystem),
 			AtRuntime(
-				Deps(tmpBaseSystem),
+				RuntimeDeps(tmpBaseSystem),
 			),
 		)...),
 		distroSources: sources,
@@ -1258,38 +1381,38 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 
 	stage2 := func(d stage2Distro) Graph {
 		return Merge(
-			linux.HeadersPkg(d),
-			libc.Pkg(d),
-			binutils.Pkg(d),
-			gcc.Pkg(d),
-			m4.Pkg(d),
-			ncurses.Pkg(d),
-			bash.Pkg(d),
-			bison.Pkg(d),
-			bzip2.Pkg(d),
-			coreutils.Pkg(d),
-			diffutils.Pkg(d),
-			file.Pkg(d),
-			findutils.Pkg(d),
-			awk.Pkg(d),
-			gettext.Pkg(d),
-			grep.Pkg(d),
-			gzip.Pkg(d),
-			make.Pkg(d),
-			patch.Pkg(d),
-			perl5.Pkg(d),
-			python3.Pkg(d),
-			sed.Pkg(d),
-			tar.Pkg(d),
-			texinfo.Pkg(d),
-			xz.Pkg(d),
+			d.LinuxHeaders(),
+			d.Libc(),
+			d.Binutils(),
+			d.GCC(),
+			d.M4(),
+			d.Ncurses(),
+			d.Bash(),
+			d.Bison(),
+			d.Bzip2(),
+			d.Coreutils(),
+			d.Diffutils(),
+			d.File(),
+			d.Findutils(),
+			d.Awk(),
+			d.Gettext(),
+			d.Make(),
+			d.Grep(),
+			d.Gzip(),
+			d.Patch(),
+			d.Perl5(),
+			d.Python3(),
+			d.Sed(),
+			d.Tar(),
+			d.Texinfo(),
+			d.Xz(),
 		)
 	}(stage2Distro{
 		Pkger: DefaultPkger(append(defaultBuildOpts,
 			llb.AddEnv("PATH", "/tools/bin:/bin:/usr/bin"),
-			stage1,
+			BuildDeps(stage1),
 			AtRuntime(
-				Deps(stage1),
+				RuntimeDeps(stage1),
 			),
 		)...),
 		distroSources: sources,
@@ -1300,7 +1423,7 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 	)
 
 	baseSystem := DefaultPkger().Exec(
-		unpatchedTmp,
+		BuildDeps(unpatchedTmp),
 		llb.AddEnv("PATH", "/tools/bin:/bin:/usr/bin"),
 		Shell(
 			`mkdir -pv /{bin,boot,etc/{opt,sysconfig},home,lib/firmware,mnt,opt}`,
@@ -1325,19 +1448,19 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			`ln -sv bash /bin/sh`,
 			`ln -sv /proc/self/mounts /etc/mtab`,
 		),
-	).With(Deps(unpatchedTmp), Name("base-system"))
+	).With(RuntimeDeps(unpatchedTmp), Name("base-system"))
 
 	stage3 := stage3Distro{
 		Pkger: DefaultPkger(append(defaultBuildOpts,
 			llb.AddEnv("PATH", "/bin:/usr/bin:/sbin:/usr/sbin:/tools/bin"),
-			baseSystem,
-			AtRuntime(Deps(baseSystem)),
+			BuildDeps(baseSystem),
+			AtRuntime(RuntimeDeps(baseSystem)),
 		)...),
 		distroSources: sources,
 	}
 
 	patchedTmp := DefaultPkger().Exec(
-		baseSystem,
+		BuildDeps(baseSystem),
 		llb.AddEnv("PATH", "/tools/bin:/bin:/usr/bin"),
 		Shell(
 			`mv -v /tools/bin/{ld,ld-old}`,
@@ -1346,85 +1469,86 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			`ln -sv /tools/bin/ld /tools/$(uname -m)-pc-linux-gnu/bin/ld`,
 			`gcc -dumpspecs | sed -e 's@/tools@@g' -e '/\*startfile_prefix_spec:/{n;s@.*@/usr/lib/ @}'  -e '/\*cpp:/{n;s@$@ -isystem /usr/include@}' > $(dirname $(gcc --print-libgcc-file-name))/specs`,
 		),
-	).With(Deps(baseSystem), Name("patched-stage2"))
+	).With(RuntimeDeps(baseSystem), Name("patched-stage2"))
 
 	distroGraph := func(d distro) Graph {
 		return Merge(
-			libc.Pkg(d),
-			linux.HeadersPkg(d),
-			manpages.Pkg(d),
-			zlib.Pkg(d),
-			file.Pkg(d),
-			readline.Pkg(d),
-			m4.Pkg(d),
-			bc.Pkg(d),
-			binutils.Pkg(d),
-			gmp.Pkg(d),
-			mpfr.Pkg(d),
-			mpc.Pkg(d),
-			gcc.Pkg(d),
-			bzip2.Pkg(d),
-			pkgconfig.Pkg(d),
-			ncurses.Pkg(d),
-			attr.Pkg(d),
-			acl.Pkg(d),
-			libcap.Pkg(d),
-			sed.Pkg(d),
-			psmisc.Pkg(d),
-			ianaetc.Pkg(d),
-			bison.Pkg(d),
-			flex.Pkg(d),
-			grep.Pkg(d),
-			bash.Pkg(d),
-			libtool.Pkg(d),
-			gdbm.Pkg(d),
-			gperf.Pkg(d),
-			expat.Pkg(d),
-			inetutils.Pkg(d),
-			perl5.Pkg(d),
-			perl5.XMLParserPkg(d),
-			intltool.Pkg(d),
-			autoconf.Pkg(d),
-			automake.Pkg(d),
-			xz.Pkg(d),
-			gettext.Pkg(d),
-			elfutils.Pkg(d),
-			libffi.Pkg(d),
-			openssl.Pkg(d),
-			python3.Pkg(d),
-			ninja.Pkg(d),
-			meson.Pkg(d),
-			coreutils.Pkg(d),
-			diffutils.Pkg(d),
-			awk.Pkg(d),
-			findutils.Pkg(d),
-			groff.Pkg(d),
-			less.Pkg(d),
-			gzip.Pkg(d),
-			iproute2.Pkg(d),
-			kbd.Pkg(d),
-			libpipeline.Pkg(d),
-			make.Pkg(d),
-			patch.Pkg(d),
-			mandb.Pkg(d),
-			tar.Pkg(d),
-			texinfo.Pkg(d),
-			procps.Pkg(d),
-			utillinux.Pkg(d),
-			e2fsprogs.Pkg(d),
-			libtasn1.Pkg(d),
-			cacerts.Pkg(d),
-			curl.Pkg(d),
-			git.Pkg(d),
-			golang.Pkg(d),
-			users.Pkg(d),
+			d.Libc(),
+			d.LinuxHeaders(),
+			d.Manpages(),
+			d.Zlib(),
+			d.File(),
+			d.Readline(),
+			d.M4(),
+			d.BC(),
+			d.Binutils(),
+			d.GMP(),
+			d.MPFR(),
+			d.MPC(),
+			d.GCC(),
+			d.Bzip2(),
+			d.PkgConfig(),
+			d.Ncurses(),
+			d.Attr(),
+			d.Acl(),
+			d.Libcap(),
+			d.Sed(),
+			d.Psmisc(),
+			d.Ianaetc(),
+			d.Bison(),
+			d.Flex(),
+			d.Grep(),
+			d.Bash(),
+			d.Libtool(),
+			d.GDBM(),
+			d.Gperf(),
+			d.Expat(),
+			d.Inetutils(),
+			d.Perl5(),
+			d.Perl5XMLParser(),
+			d.Intltool(),
+			d.Autoconf(),
+			d.Automake(),
+			d.Xz(),
+			d.Gettext(),
+			d.Elfutils(),
+			d.Libffi(),
+			d.OpenSSL(),
+			d.Python3(),
+			d.Ninja(),
+			d.Meson(),
+			d.Coreutils(),
+			d.Diffutils(),
+			d.Awk(),
+			d.Findutils(),
+			d.Groff(),
+			d.Less(),
+			d.Gzip(),
+			d.IPRoute2(),
+			d.Kbd(),
+			d.Libpipeline(),
+			d.Make(),
+			d.Patch(),
+			d.ManDB(),
+			d.Tar(),
+			d.Texinfo(),
+			d.Xz(),
+			d.Procps(),
+			d.UtilLinux(),
+			d.E2fsprogs(),
+			d.Libtasn1(),
+			d.CACerts(),
+			d.Curl(),
+			d.Git(),
+			d.Golang(),
+			d.Users(),
 			d.MiscFiles(),
 		)
 	}(distro{
 		Pkger: DefaultPkger(append(defaultBuildOpts,
 			llb.AddEnv("PATH", "/bin:/usr/bin:/sbin:/usr/sbin:/tools/bin"),
-			patchedTmp,
-			AtRuntime(Deps(patchedTmp)),
+			BuildDeps(patchedTmp),
+			AtRuntime(RuntimeDeps(patchedTmp)),
 		)...),
 		stage3Distro:  stage3,
 		distroSources: sources,

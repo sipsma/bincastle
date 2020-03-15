@@ -26,33 +26,37 @@ func Default(d interface {
 	pkgconfig.Pkger
 	attr.Pkger
 	acl.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		attr.Pkg(d),
-		acl.Pkg(d),
-		Patch(d, sed.SrcPkg(d), Shell(
-			`cd /src/sed-src`,
-			`sed -i 's/usr/tools/' build-aux/help2man`,
-			`sed -i 's/testsuite.panic-tests.sh//' Makefile.in`,
-		)),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/sed-src/configure`,
-				`--prefix=/usr`,
-				`--bindir=/bin`,
-			}, " "),
-			`make`,
-			`make install`,
-		),
-	).With(
-		Name("sed"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) sed.Pkg {
+	return sed.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Attr(),
+				d.Acl(),
+				Patch(d, d.SedSrc(), Shell(
+					`cd /src/sed-src`,
+					`sed -i 's/usr/tools/' build-aux/help2man`,
+					`sed -i 's/testsuite.panic-tests.sh//' Makefile.in`,
+				)),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/sed-src/configure`,
+					`--prefix=/usr`,
+					`--bindir=/bin`,
+				}, " "),
+				`make`,
+				`make install`,
+			),
+		).With(
+			Name("sed"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

@@ -20,28 +20,32 @@ func Default(d interface {
 	libc.Pkger
 	binutils.Pkger
 	gcc.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		golang.SrcPkg(d),
-		Shell(
-			`cd /src/golang-bootstrap-src/src`,
-			`./make.bash`,
-			`cd /src/golang-src/src`,
-			strings.Join([]string{
-				`GOROOT_BOOTSTRAP=/src/golang-bootstrap-src`,
-				`GOROOT_FINAL=/usr/lib/go`,
-				`GOBIN=/usr/bin`,
+}, opts ...Opt) golang.Pkg {
+	return golang.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.GolangSrc(),
+			),
+			Shell(
+				`cd /src/golang-bootstrap-src/src`,
 				`./make.bash`,
-			}, " "),
-			`mkdir -p /usr/lib/go`,
-			`mv /src/golang-src/* /usr/lib/go`,
-		),
-	).With(
-		Name("golang"),
-		Deps(libc.Pkg(d)),
-	).With(opts...))
+				`cd /src/golang-src/src`,
+				strings.Join([]string{
+					`GOROOT_BOOTSTRAP=/src/golang-bootstrap-src`,
+					`GOROOT_FINAL=/usr/lib/go`,
+					`GOBIN=/usr/bin`,
+					`./make.bash`,
+				}, " "),
+				`mkdir -p /usr/lib/go`,
+				`mv /src/golang-src/* /usr/lib/go`,
+			),
+		).With(
+			Name("golang"),
+			RuntimeDeps(d.Libc()),
+		).With(opts...)
+	})
 }

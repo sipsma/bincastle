@@ -24,29 +24,33 @@ func Default(d interface {
 	gcc.Pkger
 	pkgconfig.Pkger
 	ncurses.Pkger
-}, opts ...Opt) PkgBuild {
-	return PkgBuildOf(d.Exec(
-		linux.HeadersPkg(d),
-		libc.Pkg(d),
-		binutils.Pkg(d),
-		gcc.Pkg(d),
-		pkgconfig.Pkg(d),
-		ncurses.Pkg(d),
-		psmisc.SrcPkg(d),
-		ScratchMount(`/build`),
-		Shell(
-			`cd /build`,
-			strings.Join([]string{
-				`/src/psmisc-src/configure`,
-				`--prefix=/usr`,
-			}, " "),
-			`make`,
-			`make install`,
-			`mv -v /usr/bin/fuser /bin`,
-			`mv -v /usr/bin/killall /bin`,
-		),
-	).With(
-		Name("psmisc"),
-		Deps(libc.Pkg(d), ncurses.Pkg(d)),
-	).With(opts...))
+}, opts ...Opt) psmisc.Pkg {
+	return psmisc.BuildPkg(d, func() Pkg {
+		return d.Exec(
+			BuildDeps(
+				d.LinuxHeaders(),
+				d.Libc(),
+				d.Binutils(),
+				d.GCC(),
+				d.PkgConfig(),
+				d.Ncurses(),
+				d.PsmiscSrc(),
+			),
+			ScratchMount(`/build`),
+			Shell(
+				`cd /build`,
+				strings.Join([]string{
+					`/src/psmisc-src/configure`,
+					`--prefix=/usr`,
+				}, " "),
+				`make`,
+				`make install`,
+				`mv -v /usr/bin/fuser /bin`,
+				`mv -v /usr/bin/killall /bin`,
+			),
+		).With(
+			Name("psmisc"),
+			RuntimeDeps(d.Libc(), d.Ncurses()),
+		).With(opts...)
+	})
 }
