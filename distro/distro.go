@@ -1541,6 +1541,7 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			d.Curl(),
 			d.Git(),
 			d.Golang(),
+			d.Emacs(),
 			d.Users(),
 			d.MiscFiles(),
 		)
