@@ -1310,6 +1310,67 @@ func (d distro) Emacs() emacs.Pkg {
 	return emacsbuild.Default(d)
 }
 
+func (d distro) Libevent() Pkg {
+	return d.Exec(
+		BuildDeps(
+			d.LinuxHeaders(),
+			d.Libc(),
+			d.Binutils(),
+			d.GCC(),
+			d.PkgConfig(),
+			d.Automake(),
+			d.OpenSSL(),
+			d.LibeventSrc(),
+		),
+		Shell(
+			`cd /src/libevent-src`,
+			`sh autogen.sh`,
+			strings.Join([]string{`./configure`,
+				`--prefix=/usr`,
+			}, ` `),
+			`make`,
+			`make install`,
+		),
+	).With(
+		Name("libevent"),
+		RuntimeDeps(
+			d.Libc(),
+			d.OpenSSL(),
+		),
+	)
+}
+
+func (d distro) Tmux() Pkg {
+	return d.Exec(
+		BuildDeps(
+			d.LinuxHeaders(),
+			d.Libc(),
+			d.Binutils(),
+			d.GCC(),
+			d.PkgConfig(),
+			d.Automake(),
+			d.Ncurses(),
+			d.Libevent(),
+			d.TmuxSrc(),
+		),
+		Shell(
+			`cd /src/tmux-src`,
+			`sh autogen.sh`,
+			strings.Join([]string{`./configure`,
+				`--prefix=/usr`,
+			}, ` `),
+			`make`,
+			`make install`,
+		),
+	).With(
+		Name("tmux"),
+		RuntimeDeps(
+			d.Libc(),
+			d.Libevent(),
+		),
+	)
+}
+
 func (d distro) Users() users.Pkg {
 	return usersbuild.SingleUser(d,
 		// TODO make this customizable by other consumers via a field in distro
@@ -1542,6 +1603,7 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			d.Git(),
 			d.Golang(),
 			d.Emacs(),
+			d.Tmux(),
 			d.Users(),
 			d.MiscFiles(),
 		)

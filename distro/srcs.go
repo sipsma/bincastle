@@ -802,6 +802,22 @@ func (d distroSources) EmacsSrc() emacs.SrcPkg {
 	})
 }
 
+func (d distroSources) LibeventSrc() Pkg {
+	return src.Git(d,
+		Name("libevent-src"),
+		src.URL("https://github.com/libevent/libevent.git"),
+		src.Ref("release-2.1.11-stable"),
+	)
+}
+
+func (d distroSources) TmuxSrc() Pkg {
+	return src.Git(d,
+		Name("tmux-src"),
+		src.URL("https://github.com/tmux/tmux.git"),
+		src.Ref("3.0"),
+	)
+}
+
 /*
 func (d distroSources) HomedirSrc() homedir.SrcPkg {
 	return homedir.SrcPkgOnce(d, func() Pkg {
