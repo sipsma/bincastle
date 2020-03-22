@@ -11,7 +11,6 @@ import (
 	. "github.com/sipsma/bincastle/util"
 
 	"github.com/sipsma/bincastle/distro/builds/aclbuild"
-	"github.com/sipsma/bincastle/distro/builds/emacsbuild"
 	"github.com/sipsma/bincastle/distro/builds/attrbuild"
 	"github.com/sipsma/bincastle/distro/builds/autoconfbuild"
 	"github.com/sipsma/bincastle/distro/builds/automakebuild"
@@ -27,6 +26,7 @@ import (
 	"github.com/sipsma/bincastle/distro/builds/diffutilsbuild"
 	"github.com/sipsma/bincastle/distro/builds/e2fsprogsbuild"
 	"github.com/sipsma/bincastle/distro/builds/elfutilsbuild"
+	"github.com/sipsma/bincastle/distro/builds/emacsbuild"
 	"github.com/sipsma/bincastle/distro/builds/expatbuild"
 	"github.com/sipsma/bincastle/distro/builds/filebuild"
 	"github.com/sipsma/bincastle/distro/builds/findutilsbuild"
@@ -79,9 +79,11 @@ import (
 	"github.com/sipsma/bincastle/distro/builds/utillinuxbuild"
 	"github.com/sipsma/bincastle/distro/builds/xzbuild"
 	"github.com/sipsma/bincastle/distro/builds/zlibbuild"
+	"github.com/sipsma/bincastle/distro/builds/nettlebuild"
+	"github.com/sipsma/bincastle/distro/builds/libunistringbuild"
+	"github.com/sipsma/bincastle/distro/builds/gnutlsbuild"
 	"github.com/sipsma/bincastle/distro/pkgs/acl"
 	"github.com/sipsma/bincastle/distro/pkgs/attr"
-	"github.com/sipsma/bincastle/distro/pkgs/emacs"
 	"github.com/sipsma/bincastle/distro/pkgs/autoconf"
 	"github.com/sipsma/bincastle/distro/pkgs/automake"
 	"github.com/sipsma/bincastle/distro/pkgs/awk"
@@ -96,6 +98,7 @@ import (
 	"github.com/sipsma/bincastle/distro/pkgs/diffutils"
 	"github.com/sipsma/bincastle/distro/pkgs/e2fsprogs"
 	"github.com/sipsma/bincastle/distro/pkgs/elfutils"
+	"github.com/sipsma/bincastle/distro/pkgs/emacs"
 	"github.com/sipsma/bincastle/distro/pkgs/expat"
 	"github.com/sipsma/bincastle/distro/pkgs/file"
 	"github.com/sipsma/bincastle/distro/pkgs/findutils"
@@ -134,6 +137,7 @@ import (
 	"github.com/sipsma/bincastle/distro/pkgs/ncurses"
 	"github.com/sipsma/bincastle/distro/pkgs/ninja"
 	"github.com/sipsma/bincastle/distro/pkgs/openssl"
+	"github.com/sipsma/bincastle/distro/pkgs/p11kit"
 	"github.com/sipsma/bincastle/distro/pkgs/patch"
 	"github.com/sipsma/bincastle/distro/pkgs/perl5"
 	"github.com/sipsma/bincastle/distro/pkgs/pkgconfig"
@@ -148,7 +152,10 @@ import (
 	"github.com/sipsma/bincastle/distro/pkgs/utillinux"
 	"github.com/sipsma/bincastle/distro/pkgs/xz"
 	"github.com/sipsma/bincastle/distro/pkgs/zlib"
-	"github.com/sipsma/bincastle/distro/pkgs/p11kit"
+	"github.com/sipsma/bincastle/distro/pkgs/nettle"
+	"github.com/sipsma/bincastle/distro/pkgs/libunistring"
+	"github.com/sipsma/bincastle/distro/pkgs/gnutls"
+	"github.com/sipsma/bincastle/distro/src"
 )
 
 type stage1Distro struct {
@@ -1306,6 +1313,18 @@ func (d distro) Golang() golang.Pkg {
 	return golangbuild.Default(d)
 }
 
+func (d distro) Nettle() nettle.Pkg {
+	return nettlebuild.Default(d)
+}
+
+func (d distro) Libunistring() libunistring.Pkg {
+	return libunistringbuild.Default(d)
+}
+
+func (d distro) GNUTLS() gnutls.Pkg {
+	return gnutlsbuild.Default(d)
+}
+
 func (d distro) Emacs() emacs.Pkg {
 	return emacsbuild.Default(d)
 }
@@ -1398,6 +1417,149 @@ func (d distro) MiscFiles() Pkg {
 			`rm -f /etc/mtab && ln -sv /proc/self/mounts /etc/mtab`,
 		),
 	).With(RuntimeDeps(d.Bash()))
+}
+
+func (d distro) Which() Pkg {
+	return d.Exec(
+		BuildDeps(
+			d.Libc(),
+			d.LinuxHeaders(),
+			d.GCC(),
+			d.PkgConfig(),
+			d.WhichSrc(),
+		),
+		ScratchMount("/build"),
+		Shell(
+			`cd /build`,
+			strings.Join([]string{
+				`/src/which-src/configure`,
+				`--prefix=/usr`,
+			}, " "),
+		),
+	).With(
+		Name("which"),
+		RuntimeDeps(
+			d.Libc(),
+		),
+	)
+}
+
+// TODO split up into client/server pkgs
+func (d distro) OpenSSH() Pkg {
+	return d.Exec(
+		BuildDeps(
+			d.Libc(),
+			d.LinuxHeaders(),
+			d.GCC(),
+			d.PkgConfig(),
+			d.Zlib(),
+			d.OpenSSL(),
+			d.Users(),
+			d.OpenSSHSrc(),
+		),
+		ScratchMount("/build"),
+		Shell(
+			`cd /build`,
+			strings.Join([]string{
+				`/src/openssh-src/configure`,
+				`--prefix=/usr`,
+				`--sysconfdir=/etc/ssh`,
+				`--with-md5-passwords`,
+			}, " "),
+			`make`,
+			`make install`,
+		),
+	).With(
+		Name("openssh"),
+		RuntimeDeps(
+			d.Libc(),
+			d.Zlib(),
+			d.OpenSSL(),
+		),
+	)
+}
+
+// TODO this should be passed to distro from user
+func (d distro) HomeDir() Pkg {
+	return d.Exec(
+		BuildDeps(
+			d.Coreutils(),
+			d.Bash(),
+			d.CACerts(),
+			d.Golang(),
+			d.Users(),
+		),
+		ScratchMount("/build"),
+		Shell(
+			`cd /build`,
+			`mkdir -p /home/sipsma`,
+
+			// TODO this should be its own package
+			`echo 'HISTCONTROL=ignoreboth' >> /home/sipsma/.profile`,
+			`echo 'shopt -s histappend' >> /home/sipsma/.profile`,
+			`echo 'HISTSIZE=1000' >> /home/sipsma/.profile`,
+			`echo 'HISTFILESIZE=2000' >> /home/sipsma/.profile`,
+			`echo 'shopt -s checkwinsize' >> /home/sipsma/.profile`,
+			`echo 'set -o vi' >> /home/sipsma/.profile`,
+
+			// TODO this should be its own package
+			`echo 'set -g default-terminal "xterm-24bit"' >> /home/sipsma/.tmux.conf`,
+			`echo 'set -g terminal-overrides ",xterm-24bit:Tc"' >> /home/sipsma/.tmux.conf`,
+			`echo 'set -s escape-time 0' >> /home/sipsma/.tmux.conf`,
+
+			// TODO this should be its own package
+			`echo 'xterm-24bit|xterm with 24-bit direct color mode,' > terminfo`,
+			`echo '   use=xterm-256color,' >> terminfo`,
+			`echo '   sitm=\E[3m,' >> terminfo`,
+			`echo '   ritm=\E[23m,' >> terminfo`,
+			`echo '   setb24=\E[48;2;%p1%{65536}%/%d;%p1%{256}%/%{255}%&%d;%p1%{255}%&%dm,' >> terminfo`,
+			`echo '   setf24=\E[38;2;%p1%{65536}%/%d;%p1%{256}%/%{255}%&%d;%p1%{255}%&%dm,' >> terminfo`,
+			`echo '' >> terminfo`,
+			`tic -x -o /home/sipsma/.terminfo terminfo`,
+
+			// TODO this should be its own package
+			`export GO111MODULE=on`,
+			`go get golang.org/x/tools/gopls@latest`,
+		),
+	).With(
+		Name("homedir"),
+		RuntimeDeps(
+			src.Git(d.distroSources,
+				src.URL("https://github.com/sipsma/bincastle.git"),
+				src.Ref("master"),
+				Name("bincastle"),
+			).With(MountDir("/home/sipsma/.repo/github.com/sipsma/bincastle")),
+
+			src.Git(d.distroSources,
+				src.URL("https://github.com/syl20bnr/spacemacs.git"),
+				src.Ref("develop"),
+				Name("spacemacs"),
+			).With(MountDir("/home/sipsma/.emacs.d")),
+
+			// TODO need to support SSH-based clones in src/srcers.go
+			d.Exec(
+				BuildDeps(
+					d.Coreutils(),
+					d.Bash(),
+					d.Git(),
+					d.OpenSSH(),
+					d.Users(),
+				),
+				Shell(
+					// TODO updating known_hosts is a hack and insecure
+					`mkdir -p /home/sipsma/.ssh`,
+					`ssh-keyscan github.com >> /home/sipsma/.ssh/known_hosts`,
+					`mkdir -p /src/spacemacs-config`,
+					`git clone git@github.com:sipsma/home.git /src/spacemacs-config`,
+					`cd /src/spacemacs-config`,
+					`git checkout rootless`,
+				),
+			).With(
+				OutputDir("/src/spacemacs-config/.spacemacs.d"),
+				MountDir("/home/sipsma/.spacemacs.d"),
+			),
+		),
+	)
 }
 
 func Bootstrap(bootstrapGraph Graph) Graph {
@@ -1606,6 +1768,9 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 			d.Tmux(),
 			d.Users(),
 			d.MiscFiles(),
+			d.Which(),
+			d.OpenSSH(),
+			d.HomeDir(),
 		)
 	}(distro{
 		Pkger: DefaultPkger(append(defaultBuildOpts,

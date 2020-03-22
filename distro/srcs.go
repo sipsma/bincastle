@@ -74,6 +74,9 @@ import (
 	"github.com/sipsma/bincastle/distro/pkgs/xz"
 	"github.com/sipsma/bincastle/distro/pkgs/zlib"
 	"github.com/sipsma/bincastle/distro/pkgs/p11kit"
+	"github.com/sipsma/bincastle/distro/pkgs/nettle"
+	"github.com/sipsma/bincastle/distro/pkgs/libunistring"
+	"github.com/sipsma/bincastle/distro/pkgs/gnutls"
 )
 
 type distroSources struct {
@@ -792,6 +795,36 @@ func (d distroSources) GolangSrc() golang.SrcPkg {
 	})
 }
 
+func (d distroSources) NettleSrc() nettle.SrcPkg {
+	return nettle.BuildSrcPkg(d, func() Pkg {
+		return src.Curl(d,
+			Name("nettle-src"),
+			src.URL("https://ftp.gnu.org/gnu/nettle/nettle-3.5.1.tar.gz"),
+			src.StripComponents(1),
+		)
+	})
+}
+
+func (d distroSources) LibunistringSrc() libunistring.SrcPkg {
+	return libunistring.BuildSrcPkg(d, func() Pkg {
+		return src.Curl(d,
+			Name("libunistring-src"),
+			src.URL("https://ftp.gnu.org/gnu/libunistring/libunistring-0.9.10.tar.xz"),
+			src.StripComponents(1),
+		)
+	})
+}
+
+func (d distroSources) GNUTLSSrc() gnutls.SrcPkg {
+	return gnutls.BuildSrcPkg(d, func() Pkg {
+		return src.Curl(d,
+			Name("gnutls-src"),
+			src.URL("https://www.gnupg.org/ftp/gcrypt/gnutls/v3.6/gnutls-3.6.12.tar.xz"),
+			src.StripComponents(1),
+		)
+	})
+}
+
 func (d distroSources) EmacsSrc() emacs.SrcPkg {
 	return emacs.BuildSrcPkg(d, func() Pkg {
 		return src.Curl(d,
@@ -818,14 +851,18 @@ func (d distroSources) TmuxSrc() Pkg {
 	)
 }
 
-/*
-func (d distroSources) HomedirSrc() homedir.SrcPkg {
-	return homedir.SrcPkgOnce(d, func() Pkg {
-return src.Git(d,
-		Name("homedir-src"),
-		src.URL("git@github.com:sipsma/home.git"),
-		src.Ref("rootless"),
-	))
-
+func (d distroSources) WhichSrc() Pkg {
+	return src.Curl(d,
+		Name("which-src"),
+		src.URL("https://ftp.gnu.org/gnu/which/which-2.21.tar.gz"),
+		src.StripComponents(1),
+	)
 }
-*/
+
+func (d distroSources) OpenSSHSrc() Pkg {
+	return src.Curl(d,
+		Name("openssh-src"),
+		src.URL("http://ftp.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-8.2p1.tar.gz"),
+		src.StripComponents(1),
+	)
+}

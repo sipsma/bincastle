@@ -315,7 +315,7 @@ func graphToCtr(g graph.Graph, ctrState ctr.ContainerState) (ctr.Container, erro
 	// TODO most of the below needs to be configurable, not hardcoded
 	return ctrState.Start(ctr.ContainerDef{
 		ContainerProc: ctr.ContainerProc{
-			Args: []string{"/bin/bash"},
+			Args: []string{"/bin/bash", "-l"},
 			Env: []string{
 				"PATH=" + strings.Join([]string{
 					"/bin",
@@ -327,10 +327,11 @@ func graphToCtr(g graph.Graph, ctrState ctr.ContainerState) (ctr.Container, erro
 					"/usr/lib/go/bin",
 				}, ":"),
 				"SSH_AUTH_SOCK=/run/ssh-agent.sock",
-				"TERM=xterm",
+				"TERM=xterm-24bit",
+				"LANG=en_US.UTF-8",
 				"DEVCASTLE_NAME=" + ctrName,
 			},
-			WorkingDir:   "/",
+			WorkingDir:   "/home/sipsma",
 			Uid:          0,
 			Gid:          0,
 			Capabilities: &ctr.AllCaps,

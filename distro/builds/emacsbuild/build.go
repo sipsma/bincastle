@@ -5,13 +5,16 @@ import (
 
 	"github.com/sipsma/bincastle/distro/pkgs/acl"
 	"github.com/sipsma/bincastle/distro/pkgs/attr"
+	"github.com/sipsma/bincastle/distro/pkgs/cacerts"
 	"github.com/sipsma/bincastle/distro/pkgs/emacs"
+	"github.com/sipsma/bincastle/distro/pkgs/gnutls"
 	"github.com/sipsma/bincastle/distro/pkgs/gcc"
 	"github.com/sipsma/bincastle/distro/pkgs/gmp"
 	"github.com/sipsma/bincastle/distro/pkgs/libc"
 	"github.com/sipsma/bincastle/distro/pkgs/libffi"
 	"github.com/sipsma/bincastle/distro/pkgs/linux"
 	"github.com/sipsma/bincastle/distro/pkgs/ncurses"
+	"github.com/sipsma/bincastle/distro/pkgs/pkgconfig"
 	"github.com/sipsma/bincastle/distro/pkgs/zlib"
 	. "github.com/sipsma/bincastle/graph"
 	. "github.com/sipsma/bincastle/util"
@@ -24,12 +27,15 @@ func Default(d interface {
 	libc.Pkger
 	linux.HeadersPkger
 	gcc.Pkger
+	pkgconfig.Pkger
 	ncurses.Pkger
 	zlib.Pkger
 	acl.Pkger
 	attr.Pkger
 	gmp.Pkger
 	libffi.Pkger
+	gnutls.Pkger
+	cacerts.Pkger
 }, opts ...Opt) emacs.Pkg {
 	return emacs.BuildPkg(d, func() Pkg {
 		return d.Exec(
@@ -37,12 +43,15 @@ func Default(d interface {
 				d.Libc(),
 				d.LinuxHeaders(),
 				d.GCC(),
+				d.PkgConfig(),
 				d.Ncurses(),
 				d.Zlib(),
 				d.Acl(),
 				d.Attr(),
 				d.GMP(),
 				d.Libffi(),
+				d.GNUTLS(),
+				d.CACerts(),
 				d.EmacsSrc(),
 			),
 			ScratchMount(`/build`),
@@ -54,7 +63,6 @@ func Default(d interface {
 					`--localstatedir=/var`,
 					`--with-gif=no`,
 					`--with-tiff=no`,
-					`--with-gnutls=no`,
 				}, " "),
 				`make`,
 				`make install`,
@@ -71,6 +79,8 @@ func Default(d interface {
 				d.Attr(),
 				d.GMP(),
 				d.Libffi(),
+				d.GNUTLS(),
+				d.CACerts(),
 			),
 		).With(opts...)
 	})

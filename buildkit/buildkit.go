@@ -646,7 +646,7 @@ func (e *runcExecutor) Exec(
 	container, err := ctrState.Start(ctr.ContainerDef{
 		ContainerProc: ctr.ContainerProc{
 			Args:         meta.Args,
-			Env:          meta.Env,
+			Env:          append(meta.Env, "SSH_AUTH_SOCK=/run/ssh-agent.sock"),
 			WorkingDir:   meta.Cwd,
 			Uid:          0,
 			Gid:          0,
@@ -663,6 +663,10 @@ func (e *runcExecutor) Exec(
 				Dest:     "/etc/hosts",
 				Source:   e.hostsPath(),
 				Readonly: true,
+			},
+			ctr.BindMount{
+				Dest:     "/run/ssh-agent.sock",
+				Source:   "/run/ssh-agent.sock",
 			},
 		),
 	})
