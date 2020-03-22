@@ -86,6 +86,10 @@ func (d ContainerStateRoot) ContainerState(containerID string) ContainerState {
 	return ContainerState(filepath.Join(string(d), containerID))
 }
 
+func (d ContainerStateRoot) PersistentUpperDir(containerID string) string {
+	return filepath.Join(string(d), "upper", containerID)
+}
+
 type ContainerState string
 
 func (d ContainerState) RuncStateDir() string {
@@ -680,6 +684,7 @@ func ParseGenericMountOpts(options []string) GenericMountOptions {
 type MergedMount struct {
 	Dest    string
 	Sources []string
+	UpperDir string
 	GenericMountOptions
 }
 
@@ -709,9 +714,22 @@ func (m MergedMount) AddMount(
 	newMount.Sources = append(newMount.Sources, m.Sources...)
 
 	overlayDir := state.OverlayDir(m.Dest)
+	if m.UpperDir == "" {
+		m.UpperDir = overlayDir.UpperDir()
+	}
+
+	upperDir := parseOverlay(existingMount.Options).UpperDir
+	if upperDir == "" {
+		upperDir = m.UpperDir
+	} else if m.UpperDir != upperDir {
+		return fmt.Errorf("cannot overwrite existing upperdir %q with %q",
+			upperDir, m.UpperDir,
+		)
+	}
+
 	overlay := overlayOptions{
 		LowerDirs: newMount.Sources,
-		UpperDir:  overlayDir.UpperDir(),
+		UpperDir:  upperDir,
 		WorkDir:   overlayDir.WorkDir(),
 	}
 	mounts[m.Dest] = oci.Mount{
@@ -723,11 +741,12 @@ func (m MergedMount) AddMount(
 	return nil
 }
 
-func AsMergedMount(m oci.Mount) (MergedMount, error) {
+func AsMergedMount(m oci.Mount, upperDir string) (MergedMount, error) {
 	if m.Type == "overlay" {
 		return MergedMount{
 			Dest:                m.Destination,
 			Sources:             parseOverlay(m.Options).LowerDirs,
+			UpperDir: upperDir,
 			GenericMountOptions: ParseGenericMountOpts(m.Options),
 		}, nil
 	}
@@ -735,6 +754,7 @@ func AsMergedMount(m oci.Mount) (MergedMount, error) {
 		return MergedMount{
 			Dest:                m.Destination,
 			Sources:             []string{m.Source},
+			UpperDir: upperDir,
 			GenericMountOptions: ParseGenericMountOpts(m.Options),
 		}, nil
 	}

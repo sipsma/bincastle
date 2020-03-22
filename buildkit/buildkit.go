@@ -626,7 +626,7 @@ func (e *runcExecutor) Exec(
 					// turn rbinds to binds as rbinds can't be
 					// used for overlay lowerdirs
 					mntable, err = ctr.AsMergedMount(
-						ctr.ReplaceOption(newMount, "rbind", "bind"))
+						ctr.ReplaceOption(newMount, "rbind", "bind"), "")
 					if err != nil {
 						return multierror.Append(err, release()).ErrorOrNil()
 					}

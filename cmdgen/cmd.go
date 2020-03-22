@@ -28,8 +28,7 @@ import (
 const (
 	// external
 	runArg    = "run"
-	exportArg = "export"
-	attachArg = "attach"
+	cleanArg = "clean"
 
 	// internal
 	internalRunArg    = "internalRun"
@@ -153,14 +152,17 @@ func CmdMain(graphs map[string]graph.Graph) {
 				Action: func(c *cli.Context) error {
 					ctrName := c.Args().First()
 
-					ctrState := ctr.ContainerStateRoot("/var/ctrs").
-						ContainerState(ctrName)
-
+					ctrStateRoot := ctr.ContainerStateRoot("/var/ctrs")
+					ctrState := ctrStateRoot.ContainerState(ctrName)
 					if ctrState.ContainerExists() {
 						return ctr.ContainerExistsError{ctrName}
 					}
 
-					container, err := graphToCtr(graphs[ctrName], ctrState)
+					container, err := graphToCtr(
+						graphs[ctrName],
+						ctrState,
+						ctrStateRoot.PersistentUpperDir(ctrName),
+					)
 					if err != nil {
 						return fmt.Errorf(
 							"failed to prepare %s for run: %w", ctrName, err)
@@ -175,6 +177,17 @@ func CmdMain(graphs map[string]graph.Graph) {
 					return multierror.Append(
 						waitResult.Err, container.Destroy(ctx),
 					).ErrorOrNil()
+				},
+			},
+
+			{
+				Name:  cleanArg,
+				Usage: "remove any persisted filesystem changes made by previous instances of the container",
+				Action: func(c *cli.Context) error {
+					ctrName := c.Args().First()
+					return os.RemoveAll(ctr.ContainerStateRoot(filepath.Join(
+						homeDir, ".bincastle", "var", "ctrs",
+					)).PersistentUpperDir(ctrName))
 				},
 			},
 		},
@@ -236,7 +249,11 @@ func buildGraph(
 	return ctx, cancel, imageBackend, nil
 }
 
-func graphToCtr(g graph.Graph, ctrState ctr.ContainerState) (ctr.Container, error) {
+func graphToCtr(
+	g graph.Graph,
+	ctrState ctr.ContainerState,
+	upperDir string,
+) (ctr.Container, error) {
 	ctrName := ctrState.ContainerID()
 
 	ctx, cancel, imageBackend, err := buildGraph(g, true)
@@ -278,7 +295,7 @@ func graphToCtr(g graph.Graph, ctrState ctr.ContainerState) (ctr.Container, erro
 				Destination: pkgDest,
 				Type:        diffMnt.Type,
 				Options:     diffMnt.Options,
-			}, "rbind", "bind"))
+			}, "rbind", "bind"), upperDir)
 			if err != nil {
 				panic("TODO")
 			}
