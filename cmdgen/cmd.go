@@ -274,7 +274,7 @@ func graphToCtr(g graph.Graph, ctrState ctr.ContainerState) (ctr.Container, erro
 		pkgDest := graph.MountDirOf(pkg)
 		for _, diffMnt := range diffMnts {
 			mntable, err := ctr.AsMergedMount(ctr.ReplaceOption(oci.Mount{
-				Source:      diffMnt.Source,
+				Source:      filepath.Join(diffMnt.Source, graph.OutputDirOf(pkg)),
 				Destination: pkgDest,
 				Type:        diffMnt.Type,
 				Options:     diffMnt.Options,
