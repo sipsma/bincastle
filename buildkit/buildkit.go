@@ -16,6 +16,7 @@ import (
 	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/diff/apply"
 	"github.com/containerd/containerd/diff/walking"
+	"github.com/containerd/containerd/gc"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/metadata"
 	"github.com/containerd/containerd/platforms"
@@ -82,6 +83,12 @@ var (
 		ID:    "git",
 		Paths: []string{"/run/ssh-agent.sock"},
 	}
+
+	resolverFn = resolver.NewRegistryConfig(map[string]resolver.RegistryConf{
+		"docker.io": resolver.RegistryConf{
+			Mirrors: []string{"hub.docker.io"},
+		},
+	})
 )
 
 func Build(
@@ -274,13 +281,6 @@ func newController() (*control.Controller, func() error, *ImageBackend, error) {
 		"gateway.v0": gateway.NewGatewayFrontend(wc),
 	}
 
-	// TODO dedupe w/ buildkit ctrd executor
-	resolverFn := resolver.NewResolveOptionsFunc(map[string]resolver.RegistryConf{
-		"docker.io": resolver.RegistryConf{
-			Mirrors: []string{"hub.docker.io"},
-		},
-	})
-
 	remoteCacheExporterFuncs := map[string]remotecache.ResolveCacheExporterFunc{
 		"registry": registryremotecache.ResolveCacheExporterFunc(sessionManager, resolverFn),
 		"local":    localremotecache.ResolveCacheExporterFunc(sessionManager),
@@ -288,7 +288,7 @@ func newController() (*control.Controller, func() error, *ImageBackend, error) {
 	}
 
 	remoteCacheImporterFuncs := map[string]remotecache.ResolveCacheImporterFunc{
-		"registry": registryremotecache.ResolveCacheImporterFunc(sessionManager, resolverFn),
+		"registry": registryremotecache.ResolveCacheImporterFunc(sessionManager, imageBackend.ContentStore, resolverFn),
 		"local":    localremotecache.ResolveCacheImporterFunc(sessionManager),
 	}
 
@@ -385,12 +385,7 @@ func runcWorker(
 
 	imageStore := metadata.NewImageStore(metaDB)
 
-	// TODO this just disables gc, right?
-	gc := func(context.Context) error {
-		return nil
-	}
-
-	bkContentStore := bkSnapshot.NewContentStore(metaDB.ContentStore(), ns, gc)
+	bkContentStore := bkSnapshot.NewContentStore(metaDB.ContentStore(), ns)
 
 	bkMetaDB, err := cacheMetadata.NewStore(filepath.Join(root, "metadata_v2.db"))
 	if err != nil {
@@ -405,14 +400,11 @@ func runcWorker(
 	bkSnapshotter := bkSnapshot.NewSnapshotter(
 		snapshotterName,
 		metaDB.Snapshotter(snapshotterName),
-		bkContentStore,
-		bkMetaDB,
 		ns,
-		gc,
 		nil,
 	)
 
-	leaseManager := leaseutil.WithNamespace(leaseutil.NewManager(metaDB), "buildkit")
+	leaseManager := leaseutil.WithNamespace(metadata.NewLeaseManager(metaDB), "buildkit")
 
 	dnsConfig := &oci.DNSConfig{
 		Nameservers:   []string{"1.1.1.1", "8.8.8.8"},
@@ -438,11 +430,11 @@ func runcWorker(
 		Platforms:       []imageSpec.Platform{platforms.Normalize(platforms.DefaultSpec())},
 		IdentityMapping: nil,
 		LeaseManager:    leaseManager,
-		ResolveOptionsFunc: resolver.NewResolveOptionsFunc(map[string]resolver.RegistryConf{
-			"docker.io": resolver.RegistryConf{
-				Mirrors: []string{"hub.docker.io"},
-			},
-		}),
+		RegistryHosts: resolverFn,
+		GarbageCollect: func(context.Context) (gc.Stats, error) {
+			// TODO this just disable gc right?
+			return nil, nil
+		},
 	}
 
 	for _, rule := range config.DefaultGCPolicy(root, gcKeepStorage) {

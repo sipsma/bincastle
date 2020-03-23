@@ -780,7 +780,7 @@ func (m MergedMount) AddMount(
 		WorkDir:   overlayDir.WorkDir(),
 	}
 	mounts[m.Dest] = oci.Mount{
-		Source:      "",
+		Source:      "none",
 		Destination: m.Dest,
 		Type:        "overlay",
 		Options:     append(overlay.OptionsSlice(), m.GenericMountOptions.Opts()...),
