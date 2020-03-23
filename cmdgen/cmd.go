@@ -2,6 +2,7 @@ package cmdgen
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -336,7 +337,10 @@ func graphToCtr(
 				Destination: pkgDest,
 				Type:        diffMnt.Type,
 				Options:     diffMnt.Options,
-			}, "rbind", "bind"), upperDir)
+			}, "rbind", "bind"), filepath.Join(
+				upperDir,
+				base64.RawURLEncoding.EncodeToString([]byte(pkgDest)),
+			))
 			if err != nil {
 				panic("TODO")
 			}
