@@ -280,21 +280,28 @@ func (d ContainerState) Start(def ContainerDef) (Container, error) {
 		}
 	}
 	sortedMounts = sortMounts(mounts)
-	fmt.Printf("%+v\n", sortedMounts)
 
-	inFifo, err := fifo.OpenFifo(context.TODO(), d.IODir().TTYInFifo(),
-		syscall.O_CREAT|syscall.O_RDONLY|syscall.O_NONBLOCK, 0200)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tty in fifo: %w", err)
-	}
-	cleanups = cleanups.Push(inFifo.Close)
+	inFifoCh := make(chan io.ReadWriteCloser)
+	go func() {
+		defer close(inFifoCh)
+		inFifo, err := fifo.OpenFifo(context.TODO(), d.IODir().TTYInFifo(),
+			syscall.O_CREAT|syscall.O_RDONLY, 0600)
+		if err != nil {
+			panic(fmt.Errorf("failed to create tty in fifo: %w", err))
+		}
+		inFifoCh <- inFifo
+	}()
 
-	outFifo, err := fifo.OpenFifo(context.TODO(), d.IODir().TTYOutFifo(),
-		syscall.O_CREAT|syscall.O_WRONLY|syscall.O_NONBLOCK, 0400)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tty out fifo: %w", err)
-	}
-	cleanups = cleanups.Push(outFifo.Close)
+	outFifoCh := make(chan io.ReadWriteCloser)
+	go func() {
+		defer close(outFifoCh)
+		outFifo, err := fifo.OpenFifo(context.TODO(), d.IODir().TTYOutFifo(),
+			syscall.O_CREAT|syscall.O_WRONLY, 0600)
+		if err != nil {
+			panic(fmt.Errorf("failed to create tty out fifo: %w", err))
+		}
+		outFifoCh <- outFifo
+	}()
 
 	parentConsoleSock, ctrConsoleSock, err := utils.NewSockPair("console")
 	if err != nil {
@@ -333,9 +340,45 @@ func (d ContainerState) Start(def ContainerDef) (Container, error) {
 			panic(err)
 		}
 
-		go io.Copy(epollConsole, inFifo)
-		go io.Copy(outFifo, epollConsole)
-		epoller.Wait()
+		epollerCh := make(chan error)
+		go func() {
+			defer close(epollerCh)
+			epollerCh <- epoller.Wait()
+		}()
+
+		for {
+			select{
+			case inFifo := <-inFifoCh:
+				inFifoCh = nil
+				if inFifo == nil {
+					continue
+				}
+				defer inFifo.Close()
+				go func() {
+					_, err := io.Copy(epollConsole, inFifo)
+					if err != nil {
+						fmt.Printf("in-fifo copy stopped: %v\n", err)
+					}
+				}()
+			case outFifo := <-outFifoCh:
+				outFifoCh = nil
+				if outFifo == nil {
+					continue
+				}
+				defer outFifo.Close()
+				go func() {
+					_, err := io.Copy(outFifo, epollConsole)
+					if err != nil {
+						fmt.Printf("out-fifo copy stopped: %v\n", err)
+					}
+				}()
+			case err := <-epollerCh:
+				if err != nil {
+					fmt.Printf("console epoller stopped: %v\n", err)
+				}
+				return
+			}
+		}
 	}()
 
 	noNewPrivileges := true
@@ -511,23 +554,27 @@ func (c *container) DiffDirs() map[string]string {
 	return diffDirs
 }
 
-// TODO add a feature where the upper dir can be spared from destruction,
-// allowing any changes to be persisted across container restarts.
 func (c *container) Destroy(ctx context.Context) error {
-	// TODO use ctx to enforce timeout
-	// TODO something gentler than immediate SIGKILL
-	err := c.runcCtr.Signal(syscall.SIGKILL, true)
-	if err != nil {
-		return fmt.Errorf("failed to SIGKILL container: %w", err)
-	}
-
-	// TODO use ctx to enforce timeout
-	err = c.runcCtr.Destroy()
-	if err != nil {
-		return fmt.Errorf("failed to destroy container: %w", err)
-	}
-
-	return c.cleanupStack.Cleanup()
+	return multierror.Append(
+		func() error {
+			// TODO use ctx to enforce timeout
+			// TODO something gentler than immediate SIGKILL
+			err := c.runcCtr.Signal(syscall.SIGKILL, true)
+			if err != nil {
+				return fmt.Errorf("failed to SIGKILL container: %w", err)
+			}
+			return nil
+		}(),
+		func() error {
+			// TODO use ctx to enforce timeout
+			err := c.runcCtr.Destroy()
+			if err != nil {
+				return fmt.Errorf("failed to destroy container: %w", err)
+			}
+			return nil
+		}(),
+		c.cleanupStack.Cleanup(),
+	)
 }
 
 func (c *container) Attach(ctx context.Context, in io.Reader, out io.Writer) error {

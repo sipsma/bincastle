@@ -3,8 +3,6 @@ package cmdgen
 import (
 	"context"
 	"fmt"
-	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +19,7 @@ import (
 	"github.com/sipsma/bincastle/ctr"
 	"github.com/sipsma/bincastle/graph"
 	"github.com/urfave/cli"
+	"golang.org/x/sys/unix"
 
 	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 )
@@ -54,7 +53,7 @@ func CmdInit() {
 func CmdMain(graphs map[string]graph.Graph) {
 	selfBin, err := os.Readlink("/proc/self/exe")
 	if err != nil {
-		panic("TODO")
+		panic(err)
 	}
 
 	app := &cli.App{
@@ -98,8 +97,8 @@ func CmdMain(graphs map[string]graph.Graph) {
 								"SSH_AUTH_SOCK=/run/ssh-agent.sock",
 							},
 							WorkingDir:   "/",
-							Uid:          0,
-							Gid:          0,
+							Uid:          uint32(unix.Geteuid()),
+							Gid:          uint32(unix.Getegid()),
 							Capabilities: &ctr.AllCaps,
 						},
 						Hostname: "bincastle",
@@ -136,14 +135,37 @@ func CmdMain(graphs map[string]graph.Graph) {
 					}
 
 					ctx, cancel := context.WithCancel(context.Background())
-					defer cancel()
 
-					go ctr.AttachConsole(ctx, container)
+					attachCh := make(chan error)
+					go func() {
+						defer close(attachCh)
+						attachCh <- ctr.AttachConsole(ctx, container)
+					}()
 
-					waitResult := container.Wait(ctx)
+					waitCh := make(chan ctr.WaitResult)
+					go func() {
+						defer close(waitCh)
+						waitCh <- container.Wait(ctx)
+					}()
+
+					var finalErr error
+					for attachCh != nil || waitCh != nil {
+						select {
+						case err := <-attachCh:
+							attachCh = nil
+							cancel()
+							finalErr = multierror.Append(
+								finalErr, err).ErrorOrNil()
+						case waitResult := <-waitCh:
+							waitCh = nil
+							cancel()
+							finalErr = multierror.Append(
+								finalErr, waitResult.Err).ErrorOrNil()
+						}
+					}
+
 					return multierror.Append(
-						waitResult.Err, container.Destroy(ctx),
-					).ErrorOrNil()
+						finalErr, container.Destroy(ctx)).ErrorOrNil()
 				},
 			},
 			{
@@ -171,12 +193,36 @@ func CmdMain(graphs map[string]graph.Graph) {
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
 
-					go ctr.AttachConsole(ctx, container)
+					attachCh := make(chan error)
+					go func() {
+						defer close(attachCh)
+						attachCh <- ctr.AttachConsole(ctx, container)
+					}()
 
-					waitResult := container.Wait(ctx)
+					waitCh := make(chan ctr.WaitResult)
+					go func() {
+						defer close(waitCh)
+						waitCh <- container.Wait(ctx)
+					}()
+
+					var finalErr error
+					for attachCh != nil || waitCh != nil {
+						select {
+						case err := <-attachCh:
+							attachCh = nil
+							cancel()
+							finalErr = multierror.Append(
+								finalErr, err).ErrorOrNil()
+						case waitResult := <-waitCh:
+							waitCh = nil
+							cancel()
+							finalErr = multierror.Append(
+								finalErr, waitResult.Err).ErrorOrNil()
+						}
+					}
+
 					return multierror.Append(
-						waitResult.Err, container.Destroy(ctx),
-					).ErrorOrNil()
+						finalErr, container.Destroy(ctx)).ErrorOrNil()
 				},
 			},
 
@@ -202,11 +248,6 @@ func buildGraph(
 	g graph.Graph,
 	unpack bool,
 ) (context.Context, context.CancelFunc, *buildkit.ImageBackend, error) {
-	// TODO debug mode
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-
 	ctx, cancel := context.WithCancel(
 		namespaces.WithNamespace(context.Background(), "buildkit"))
 

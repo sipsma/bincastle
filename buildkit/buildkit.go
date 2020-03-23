@@ -638,8 +638,6 @@ func (e *runcExecutor) Exec(
 		}
 	}
 
-	fmt.Println(ctrMounts)
-
 	execID := identity.NewID()
 	ctrState := ctr.ContainerStateRoot(e.execsDir()).ContainerState(execID)
 
