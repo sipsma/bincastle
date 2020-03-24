@@ -641,8 +641,8 @@ func AttachConsole(ctx context.Context, attacher Attachable) error {
 	select {
 	case err := <-attachCh:
 		return err
-	case <-sigchan:
-		panic("sigint, sigterm or sighup during console attach")
+	case sig := <-sigchan:
+		return fmt.Errorf("received signal %s during consoe attach", sig)
 	}
 }
 

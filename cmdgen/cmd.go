@@ -62,7 +62,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 			{
 				Name:  runArg,
 				Usage: "start the system in a rootless container",
-				Action: func(c *cli.Context) error {
+				Action: func(c *cli.Context) (err error) {
 					ctrName := c.Args().First()
 					if graphs[ctrName] == nil {
 						// TODO more helpful message
@@ -70,7 +70,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 					}
 
 					varDir := filepath.Join(homeDir, ".bincastle", "var")
-					err := os.MkdirAll(varDir, 0700)
+					err = os.MkdirAll(varDir, 0700)
 					if err != nil {
 						return err
 					}
@@ -131,9 +131,12 @@ func CmdMain(graphs map[string]graph.Graph) {
 					})
 					if err != nil {
 						return fmt.Errorf(
-							"failed to load container state for %s: %w",
+							"failed to run container %q: %w",
 							ctrName, err)
 					}
+					defer func() {
+						err = multierror.Append(err, container.Destroy(context.TODO()))
+					}()
 
 					ctx, cancel := context.WithCancel(context.Background())
 
@@ -149,30 +152,26 @@ func CmdMain(graphs map[string]graph.Graph) {
 						waitCh <- container.Wait(ctx)
 					}()
 
-					var finalErr error
 					for attachCh != nil || waitCh != nil {
 						select {
-						case err := <-attachCh:
+						case attachErr := <-attachCh:
 							attachCh = nil
 							cancel()
-							finalErr = multierror.Append(
-								finalErr, err).ErrorOrNil()
+							err = multierror.Append(err, attachErr).ErrorOrNil()
 						case waitResult := <-waitCh:
 							waitCh = nil
 							cancel()
-							finalErr = multierror.Append(
-								finalErr, waitResult.Err).ErrorOrNil()
+							err = multierror.Append(err, waitResult.Err).ErrorOrNil()
 						}
 					}
 
-					return multierror.Append(
-						finalErr, container.Destroy(ctx)).ErrorOrNil()
+					return err
 				},
 			},
 			{
 				Name:   internalRunArg,
 				Hidden: true,
-				Action: func(c *cli.Context) error {
+				Action: func(c *cli.Context) (err error) {
 					ctrName := c.Args().First()
 
 					ctrStateRoot := ctr.ContainerStateRoot("/var/ctrs")
@@ -191,6 +190,10 @@ func CmdMain(graphs map[string]graph.Graph) {
 							"failed to prepare %s for run: %w", ctrName, err)
 					}
 
+					defer func() {
+						err = multierror.Append(err, container.Destroy(context.TODO()))
+					}()
+
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
 
@@ -206,24 +209,20 @@ func CmdMain(graphs map[string]graph.Graph) {
 						waitCh <- container.Wait(ctx)
 					}()
 
-					var finalErr error
 					for attachCh != nil || waitCh != nil {
 						select {
-						case err := <-attachCh:
+						case attachErr := <-attachCh:
 							attachCh = nil
 							cancel()
-							finalErr = multierror.Append(
-								finalErr, err).ErrorOrNil()
+							err = multierror.Append(err, attachErr).ErrorOrNil()
 						case waitResult := <-waitCh:
 							waitCh = nil
 							cancel()
-							finalErr = multierror.Append(
-								finalErr, waitResult.Err).ErrorOrNil()
+							err = multierror.Append(err, waitResult.Err).ErrorOrNil()
 						}
 					}
 
-					return multierror.Append(
-						finalErr, container.Destroy(ctx)).ErrorOrNil()
+					return err
 				},
 			},
 
