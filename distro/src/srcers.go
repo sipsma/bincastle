@@ -4,101 +4,136 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/moby/buildkit/client/llb"
 	. "github.com/sipsma/bincastle/graph"
 	. "github.com/sipsma/bincastle/util"
 )
 
-type URL string
-type urlKey struct{}
-func URLOf(p Pkg) string {
-	url, ok := PkgValueOf(p, urlKey{}).(string)
-	if !ok {
-		return ""
-	}
-	return url
+type AlwaysRun bool
+type alwaysRun OptionKey
+func (o AlwaysRun) OptionSet() OptionSet {
+	return Option(alwaysRun{}, bool(o))
 }
-func (u URL) ApplyToPkg(p Pkg) Pkg {
-	return PkgValue(urlKey{}, string(u)).ApplyToPkg(p)
+func AlwaysRunOf(opts ...OptionSetter) bool {
+	return GetBool(alwaysRun{}, false, opts...)
 }
 
-const defaultStripComponents = 1
 type StripComponents int
-type stripComponentsKey struct{}
-func StripComponentsOf(p Pkg) int {
-	stripComponents, ok := PkgValueOf(p, stripComponentsKey{}).(int)
-	if !ok {
-		return defaultStripComponents
-	}
-	return stripComponents
+type stripComponents OptionKey
+func (o StripComponents) OptionSet() OptionSet {
+	return Option(stripComponents{}, int(o))
 }
-func (s StripComponents) ApplyToPkg(p Pkg) Pkg {
-	return PkgValue(stripComponentsKey{}, int(s)).ApplyToPkg(p)
+func StripComponentsOf(opts ...OptionSetter) int {
+	return GetInt(stripComponents{}, 0, opts...)
 }
 
-func Curl(distro Executor, opts ...Opt) Pkg {
-	opt := PkgOf(opts...)
-	url := URLOf(opt)
-	if url == "" {
-		panic("TODO")
-	}
+type Ref string
+type ref OptionKey
+func (o Ref) OptionSet() OptionSet {
+	return Option(ref{}, string(o))
+}
+func RefOf(opts ...OptionSetter) string {
+	return GetString(ref{}, "master", opts...)
+}
 
-	name := NameOf(opt)
+type CurlOpt struct {
+	AlwaysRun
+	StripComponents
+}
+
+func CurlOptionSet(opts ...CurlOpt) OptionSet {
+	optionSet := EmptyOptionSet()
+	for _, opt := range opts {
+		optionSet = optionSet.Merge(
+			opt.AlwaysRun,
+			opt.StripComponents,
+		)
+	}
+	return optionSet
+}
+
+func Curl(
+	distro Executor,
+	name string, // TODO make optional?
+	url string,
+	curlOpts ...CurlOpt,
+) Pkg {
+	opts := CurlOptionSet(curlOpts...)
 	if name == "" {
-		panic("TODO use a random default instead of panicking?")
+		panic("name must be set")
 	}
 
-	stripComponents := StripComponentsOf(opt)
+	if url == "" {
+		panic("url must be set")
+	}
 
-	return distro.Exec(Shell(
+	runOpts := []llb.RunOption{Shell(
 		`mkdir -p /src`,
 		`cd /src`,
 		fmt.Sprintf("curl -L -O %s", url),
 		`DLFILE=$(ls)`,
 		fmt.Sprintf(
 			`tar --strip-components=%d --extract --no-same-owner --file=$DLFILE`,
-			stripComponents),
+			StripComponentsOf(opts)),
 		`rm $DLFILE`,
-	)).With(
+	)}
+
+	if AlwaysRunOf(opts) {
+		runOpts = append(runOpts, llb.IgnoreCache)
+	}
+
+	return distro.Exec(runOpts...).With(
 		OutputDir("/src"),
 		MountDir(filepath.Join("/src", name)),
-	).With(opts...)
+		Name(name),
+	)
 }
 
-type Ref string
-type refKey struct{}
-const defaultRef = "master"
-func RefOf(p Pkg) string {
-	ref, ok := PkgValueOf(p, refKey{}).(string)
-	if !ok {
-		return defaultRef
+type GitOpt struct {
+	AlwaysRun
+	Ref
+}
+
+func GitOptionSet(opts ...GitOpt) OptionSet {
+	optionSet := EmptyOptionSet()
+	for _, opt := range opts {
+		optionSet = optionSet.Merge(
+			opt.AlwaysRun,
+			opt.Ref,
+		)
 	}
-	return ref
-}
-func (r Ref) ApplyToPkg(p Pkg) Pkg {
-	return PkgValue(refKey{}, string(r)).ApplyToPkg(p)
+	return optionSet
 }
 
-func Git(distro Executor, opts ...Opt) Pkg {
-	opt := PkgOf(opts...)
-	url := URLOf(opt)
-	if url == "" {
-		panic("TODO")
-	}
-
-	name := NameOf(opt)
+func Git(
+	distro Executor,
+	name string,
+	url string,
+	gitOpts ...GitOpt,
+) Pkg {
+	opts := GitOptionSet(gitOpts...)
 	if name == "" {
-		panic("TODO use a random default instead of panicking?")
+		panic("name must be set")
 	}
 
-	ref := RefOf(opt)
+	if url == "" {
+		panic("url must be set")
+	}
 
-	return distro.Exec(Shell(
+	runOpts := []llb.RunOption{Shell(
 		`mkdir -p /src`,
 		fmt.Sprintf(`git clone --recurse-submodules %s /src`, url),
 		`cd /src`,
-		fmt.Sprintf(`git checkout %s`, ref),
-	)).With(
+		fmt.Sprintf(`git checkout %s`, RefOf(opts)),
+	)}
+
+	if AlwaysRunOf(opts) {
+		runOpts = append(runOpts, llb.IgnoreCache)
+	}
+
+	return distro.Exec(runOpts...).With(
 		OutputDir("/src"),
 		MountDir(filepath.Join("/src", name)),
-	).With(opts...)
+		Name(name),
+	)
 }

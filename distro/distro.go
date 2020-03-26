@@ -1525,15 +1525,21 @@ func (d distro) HomeDir() Pkg {
 		Name("homedir"),
 		RuntimeDeps(
 			src.Git(d.distroSources,
-				src.URL("https://github.com/sipsma/bincastle.git"),
-				src.Ref("master"),
-				Name("bincastle"),
+				"bincastle-src",
+				"https://github.com/sipsma/bincastle.git",
+				src.GitOpt{
+					AlwaysRun: true,
+					Ref: "master",
+				},
 			).With(MountDir("/home/sipsma/.repo/github.com/sipsma/bincastle")),
 
 			src.Git(d.distroSources,
-				src.URL("https://github.com/syl20bnr/spacemacs.git"),
-				src.Ref("develop"),
-				Name("spacemacs"),
+				"spacemacs",
+				"https://github.com/syl20bnr/spacemacs.git",
+				src.GitOpt{
+					AlwaysRun: true,
+					Ref: "develop",
+				},
 			).With(MountDir("/home/sipsma/.emacs.d")),
 
 			// TODO need to support SSH-based clones in src/srcers.go
@@ -1554,6 +1560,7 @@ func (d distro) HomeDir() Pkg {
 					`cd /src/spacemacs-config`,
 					`git checkout rootless`,
 				),
+				llb.IgnoreCache,
 			).With(
 				OutputDir("/src/spacemacs-config/.spacemacs.d"),
 				MountDir("/home/sipsma/.spacemacs.d"),
