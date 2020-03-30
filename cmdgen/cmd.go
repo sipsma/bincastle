@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/containerd/containerd/namespaces"
 	"github.com/hashicorp/go-multierror"
@@ -134,11 +135,17 @@ func CmdMain(graphs map[string]graph.Graph) {
 							"failed to run container %q: %w",
 							ctrName, err)
 					}
-					defer func() {
-						err = multierror.Append(err, container.Destroy(context.TODO()))
-					}()
+
+					var destroyOnce sync.Once
+					doDestroy := func() {
+						destroyOnce.Do(func() {
+							err = multierror.Append(err, container.Destroy(context.TODO()))
+						})
+					}
+					defer doDestroy()
 
 					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
 
 					attachCh := make(chan error)
 					go func() {
@@ -156,7 +163,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 						select {
 						case attachErr := <-attachCh:
 							attachCh = nil
-							cancel()
+							doDestroy()
 							err = multierror.Append(err, attachErr).ErrorOrNil()
 						case waitResult := <-waitCh:
 							waitCh = nil
@@ -190,9 +197,13 @@ func CmdMain(graphs map[string]graph.Graph) {
 							"failed to prepare %s for run: %w", ctrName, err)
 					}
 
-					defer func() {
-						err = multierror.Append(err, container.Destroy(context.TODO()))
-					}()
+					var destroyOnce sync.Once
+					doDestroy := func() {
+						destroyOnce.Do(func() {
+							err = multierror.Append(err, container.Destroy(context.TODO()))
+						})
+					}
+					defer doDestroy()
 
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
@@ -213,7 +224,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 						select {
 						case attachErr := <-attachCh:
 							attachCh = nil
-							cancel()
+							doDestroy()
 							err = multierror.Append(err, attachErr).ErrorOrNil()
 						case waitResult := <-waitCh:
 							waitCh = nil

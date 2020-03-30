@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/containerd/console"
 	"github.com/containerd/containerd/cio"
@@ -557,11 +558,19 @@ func (c *container) DiffDirs() map[string]string {
 func (c *container) Destroy(ctx context.Context) error {
 	return multierror.Append(
 		func() error {
-			// TODO use ctx to enforce timeout
-			// TODO something gentler than immediate SIGKILL
-			err := c.runcCtr.Signal(syscall.SIGKILL, true)
+			err := c.runcCtr.Signal(syscall.SIGTERM, false)
 			if err != nil {
-				return fmt.Errorf("failed to SIGKILL container: %w", err)
+				runcErr, ok := err.(libcontainer.Error)
+				if !ok || runcErr.Code() != libcontainer.ContainerNotRunning {
+					return fmt.Errorf("failed to SIGTERM container: %w", err)
+				}
+			}
+
+			timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second) // TODO don't hardcode
+			defer cancel()
+			waitResult := c.Wait(timeoutCtx)
+			if waitResult.Err == context.DeadlineExceeded {
+				return fmt.Errorf("timed out waiting for container shutdown after SIGTERM, will send SIGKILL: %w", waitResult.Err)
 			}
 			return nil
 		}(),
@@ -642,7 +651,7 @@ func AttachConsole(ctx context.Context, attacher Attachable) error {
 	case err := <-attachCh:
 		return err
 	case sig := <-sigchan:
-		return fmt.Errorf("received signal %s during consoe attach", sig)
+		return fmt.Errorf("received signal %q during console attach", sig)
 	}
 }
 
@@ -651,9 +660,9 @@ func (c *container) Wait(ctx context.Context) WaitResult {
 	go func() {
 		state, err := c.initProc.Wait()
 		exitCode := state.ExitCode()
-		if exitCode != 0 {
+		if exitCode != 0 && exitCode != -1 {
 			err = multierror.Append(err, fmt.Errorf(
-				"task exited with non-zero status %d", exitCode)).ErrorOrNil()
+				"container exited with non-zero status %d", exitCode)).ErrorOrNil()
 		}
 		waitCh <- WaitResult{State: state, Err: err}
 	}()
