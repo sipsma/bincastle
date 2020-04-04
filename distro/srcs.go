@@ -746,7 +746,7 @@ func (d distroSources) OpenSSLSrc() openssl.SrcPkg {
 	return openssl.BuildSrcPkg(d, func() Pkg {
 		return src.Curl(d,
 			"openssl-src",
-			"https://www.openssl.org/source/openssl-1.1.1c.tar.gz",
+			"https://www.openssl.org/source/openssl-1.1.1f.tar.gz",
 			src.CurlOpt{
 				StripComponents: 1,
 			},
