@@ -316,6 +316,7 @@ func (d ContainerState) Start(def ContainerDef) (Container, error) {
 	}
 	cleanups = cleanups.Push(epoller.Close)
 
+	consoleResizeCh := make(chan console.WinSize)
 	go func() {
 		// TODO need real logging
 		f, err := utils.RecvFd(parentConsoleSock)
@@ -348,7 +349,7 @@ func (d ContainerState) Start(def ContainerDef) (Container, error) {
 		}()
 
 		for {
-			select{
+			select {
 			case inFifo := <-inFifoCh:
 				inFifoCh = nil
 				if inFifo == nil {
@@ -373,6 +374,11 @@ func (d ContainerState) Start(def ContainerDef) (Container, error) {
 						fmt.Printf("out-fifo copy stopped: %v\n", err)
 					}
 				}()
+			case winSize := <-consoleResizeCh:
+				err := ctrConsole.Resize(winSize)
+				if err != nil {
+					fmt.Printf("console resize failed: %v\n", err)
+				}
 			case err := <-epollerCh:
 				if err != nil {
 					fmt.Printf("console epoller stopped: %v\n", err)
@@ -465,11 +471,12 @@ func (d ContainerState) Start(def ContainerDef) (Container, error) {
 	}
 
 	return &container{
-		state:        d,
-		initProc:     runcProc,
-		runcCtr:      c,
-		cleanupStack: cleanups,
-		mounts:       mounts,
+		state:           d,
+		initProc:        runcProc,
+		runcCtr:         c,
+		cleanupStack:    cleanups,
+		mounts:          mounts,
+		consoleResizeCh: consoleResizeCh,
 	}, nil
 }
 
@@ -499,6 +506,7 @@ func (d IODir) TTYInFifo() string {
 
 type Attachable interface {
 	Attach(ctx context.Context, in io.Reader, out io.Writer) error
+	Resize(console.WinSize)
 }
 
 type Container interface {
@@ -537,11 +545,12 @@ func (cleanups CleanupStack) Cleanup() error {
 }
 
 type container struct {
-	state        ContainerState
-	initProc     libcontainer.Process
-	runcCtr      libcontainer.Container
-	cleanupStack CleanupStack
-	mounts       map[string]oci.Mount
+	state           ContainerState
+	initProc        libcontainer.Process
+	runcCtr         libcontainer.Container
+	cleanupStack    CleanupStack
+	mounts          map[string]oci.Mount
+	consoleResizeCh chan<- console.WinSize
 }
 
 func (c *container) DiffDirs() map[string]string {
@@ -623,6 +632,10 @@ func (c *container) Attach(ctx context.Context, in io.Reader, out io.Writer) err
 	}
 }
 
+func (c *container) Resize(winSize console.WinSize) {
+	c.consoleResizeCh <- winSize
+}
+
 func AttachConsole(ctx context.Context, attacher Attachable) error {
 	stdinConsole, err := console.ConsoleFromFile(os.Stdin)
 	if err != nil {
@@ -641,17 +654,31 @@ func AttachConsole(ctx context.Context, attacher Attachable) error {
 	}()
 
 	// TODO need more configurable signal handling
-	// This ensures that we reset the console before the process exits.
-	// If you don't, when you drop back to a shell it behaves very "raw"
-	// (which is to say, weird).
+	// Handling SIG{INT,TERM,HUP} ensures that we reset the console
+	// before the process exits. If you don't, when you drop back
+	// to a shell it behaves very "raw" (which is to say, weird).
 	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigchan,
+		syscall.SIGWINCH,
+		syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP,
+	)
 
-	select {
-	case err := <-attachCh:
-		return err
-	case sig := <-sigchan:
-		return fmt.Errorf("received signal %q during console attach", sig)
+	for {
+		select {
+		case err := <-attachCh:
+			return err
+		case sig := <-sigchan:
+			if unixSig, ok := sig.(syscall.Signal); ok && unixSig == syscall.SIGWINCH {
+				newSize, err := stdinConsole.Size()
+				if err != nil {
+					fmt.Printf("failed to get tty size after SIGWINCH: %v\n", err)
+				} else {
+					attacher.Resize(newSize)
+				}
+			} else {
+				return fmt.Errorf("received signal %q during console attach", sig)
+			}
+		}
 	}
 }
 
@@ -738,8 +765,8 @@ func ParseGenericMountOpts(options []string) GenericMountOptions {
 }
 
 type MergedMount struct {
-	Dest    string
-	Sources []string
+	Dest     string
+	Sources  []string
 	UpperDir string
 	GenericMountOptions
 }
@@ -802,7 +829,7 @@ func AsMergedMount(m oci.Mount, upperDir string) (MergedMount, error) {
 		return MergedMount{
 			Dest:                m.Destination,
 			Sources:             parseOverlay(m.Options).LowerDirs,
-			UpperDir: upperDir,
+			UpperDir:            upperDir,
 			GenericMountOptions: ParseGenericMountOpts(m.Options),
 		}, nil
 	}
@@ -810,7 +837,7 @@ func AsMergedMount(m oci.Mount, upperDir string) (MergedMount, error) {
 		return MergedMount{
 			Dest:                m.Destination,
 			Sources:             []string{m.Source},
-			UpperDir: upperDir,
+			UpperDir:            upperDir,
 			GenericMountOptions: ParseGenericMountOpts(m.Options),
 		}, nil
 	}
