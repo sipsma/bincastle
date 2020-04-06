@@ -729,15 +729,6 @@ func (n Name) ApplyToPkg(p Pkg) Pkg {
 	return PkgValue(nameKey{}, n).ApplyToPkg(p)
 }
 
-// TODO this is just a hack to enable parallel
-// builds of the tmp system, need a better way
-func DepOnlyPkg(depGraphs ...Graph) Pkg {
-	return DefaultPkger().Exec(
-		BuildDeps(Merge(depGraphs...)),
-		llb.Args([]string{"/bin/bash", "--version"}),
-	)
-}
-
 func Patch(d Executor, p Pkg, runOpts ...llb.RunOption) Pkg {
 	return d.Exec(append(runOpts, BuildDeps(p))...).With(
 		RuntimeDeps(p),

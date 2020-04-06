@@ -2,21 +2,17 @@ package cmdgen
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
-	"sync"
+	"syscall"
 
 	"github.com/containerd/containerd/namespaces"
 	"github.com/hashicorp/go-multierror"
 	"github.com/moby/buildkit/client/llb"
-	bkIdentity "github.com/moby/buildkit/identity"
-	"github.com/opencontainers/image-spec/identity"
 	"github.com/opencontainers/runc/libcontainer"
-	oci "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sipsma/bincastle/buildkit"
 	"github.com/sipsma/bincastle/ctr"
 	"github.com/sipsma/bincastle/graph"
@@ -28,11 +24,11 @@ import (
 
 const (
 	// external
-	runArg    = "run"
+	runArg   = "run"
 	cleanArg = "clean"
 
 	// internal
-	internalRunArg    = "internalRun"
+	internalRunArg = "internalRun"
 )
 
 var (
@@ -52,7 +48,7 @@ func CmdInit() {
 	}
 }
 
-func CmdMain(graphs map[string]graph.Graph) {
+func CmdMain(pkgs map[string]graph.Pkg) {
 	selfBin, err := os.Readlink("/proc/self/exe")
 	if err != nil {
 		panic(err)
@@ -65,7 +61,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 				Usage: "start the system in a rootless container",
 				Action: func(c *cli.Context) (err error) {
 					ctrName := c.Args().First()
-					if graphs[ctrName] == nil {
+					if pkgs[ctrName] == nil {
 						// TODO more helpful message
 						return fmt.Errorf("name %q has no associated graph", ctrName)
 					}
@@ -129,50 +125,45 @@ func CmdMain(graphs map[string]graph.Graph) {
 								Readonly: true,
 							},
 						),
-					})
+					}, true)
 					if err != nil {
 						return fmt.Errorf(
 							"failed to run container %q: %w",
 							ctrName, err)
 					}
 
-					var destroyOnce sync.Once
-					doDestroy := func() {
-						destroyOnce.Do(func() {
-							err = multierror.Append(err, container.Destroy(context.TODO()))
-						})
-					}
-					defer doDestroy()
+					defer func() {
+						err = multierror.Append(err,
+							container.Destroy(context.TODO())).ErrorOrNil()
+					}()
 
 					ctx, cancel := context.WithCancel(context.Background())
-					defer cancel()
 
-					attachCh := make(chan error)
+					sigchan := make(chan os.Signal, 1)
+					signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 					go func() {
-						defer close(attachCh)
-						attachCh <- ctr.AttachConsole(ctx, container)
+						defer cancel()
+						<-sigchan
 					}()
 
-					waitCh := make(chan ctr.WaitResult)
+					attachDone := make(chan struct{})
 					go func() {
-						defer close(waitCh)
-						waitCh <- container.Wait(ctx)
-					}()
-
-					for attachCh != nil || waitCh != nil {
-						select {
-						case attachErr := <-attachCh:
-							attachCh = nil
-							doDestroy()
-							err = multierror.Append(err, attachErr).ErrorOrNil()
-						case waitResult := <-waitCh:
-							waitCh = nil
-							cancel()
-							err = multierror.Append(err, waitResult.Err).ErrorOrNil()
+						defer close(attachDone)
+						attachErr := ctr.AttachConsole(ctx, container)
+						if attachErr != nil && attachErr != context.Canceled {
+							err = multierror.Append(err,
+								fmt.Errorf("error during console attach: %w", attachErr),
+							).ErrorOrNil()
 						}
-					}
+					}()
+					defer func() {
+						cancel()
+						// make sure attach has returned before returning (so we know the
+						// console tty has been reset).
+						<-attachDone
+					}()
 
-					return err
+					return multierror.Append(err, container.Wait(ctx).Err)
 				},
 			},
 			{
@@ -180,6 +171,7 @@ func CmdMain(graphs map[string]graph.Graph) {
 				Hidden: true,
 				Action: func(c *cli.Context) (err error) {
 					ctrName := c.Args().First()
+					pkg := pkgs[ctrName]
 
 					ctrStateRoot := ctr.ContainerStateRoot("/var/ctrs")
 					ctrState := ctrStateRoot.ContainerState(ctrName)
@@ -187,64 +179,32 @@ func CmdMain(graphs map[string]graph.Graph) {
 						return ctr.ContainerExistsError{ctrName}
 					}
 
-					container, err := graphToCtr(
-						graphs[ctrName],
-						ctrState,
-						ctrStateRoot.PersistentUpperDir(ctrName),
-					)
-					if err != nil {
-						return fmt.Errorf(
-							"failed to prepare %s for run: %w", ctrName, err)
-					}
-
-					var destroyOnce sync.Once
-					doDestroy := func() {
-						destroyOnce.Do(func() {
-							err = multierror.Append(err, container.Destroy(context.TODO()))
-						})
-					}
-					defer doDestroy()
-
-					ctx, cancel := context.WithCancel(context.Background())
+					ctx, cancel := context.WithCancel(
+						namespaces.WithNamespace(context.Background(), "buildkit"))
 					defer cancel()
 
-					attachCh := make(chan error)
-					go func() {
-						defer close(attachCh)
-						attachCh <- ctr.AttachConsole(ctx, container)
-					}()
-
-					waitCh := make(chan ctr.WaitResult)
-					go func() {
-						defer close(waitCh)
-						waitCh <- container.Wait(ctx)
-					}()
-
-					for attachCh != nil || waitCh != nil {
-						select {
-						case attachErr := <-attachCh:
-							attachCh = nil
-							doDestroy()
-							err = multierror.Append(err, attachErr).ErrorOrNil()
-						case waitResult := <-waitCh:
-							waitCh = nil
-							cancel()
-							err = multierror.Append(err, waitResult.Err).ErrorOrNil()
-						}
+					// TODO just remove imageBackend var entirely?
+					buildkitErrCh, _ := buildkit.Buildkitd(ctx)
+					select {
+					case err := <-buildkitErrCh:
+						return err
+					default:
 					}
 
-					return err
+					llbdef, err := pkg.State().Marshal(llb.LinuxAmd64)
+					if err != nil {
+						return err
+					}
+
+					return buildkit.Build(ctx, "", llbdef, nil, false)
 				},
 			},
 
 			{
 				Name:  cleanArg,
-				Usage: "remove any persisted filesystem changes made by previous instances of the container",
+				Usage: "remove any persisted filesystem changes and caches",
 				Action: func(c *cli.Context) error {
-					ctrName := c.Args().First()
-					return os.RemoveAll(ctr.ContainerStateRoot(filepath.Join(
-						homeDir, ".bincastle", "var", "ctrs",
-					)).PersistentUpperDir(ctrName))
+					return os.RemoveAll(filepath.Join(homeDir, ".bincastle", "var"))
 				},
 			},
 		},
@@ -253,162 +213,4 @@ func CmdMain(graphs map[string]graph.Graph) {
 	if err := app.Run(os.Args); err != nil {
 		panic(err)
 	}
-}
-
-func buildGraph(
-	g graph.Graph,
-	unpack bool,
-) (context.Context, context.CancelFunc, *buildkit.ImageBackend, error) {
-	ctx, cancel := context.WithCancel(
-		namespaces.WithNamespace(context.Background(), "buildkit"))
-
-	buildkitErrCh, imageBackend := buildkit.Buildkitd(ctx)
-	select {
-	case err := <-buildkitErrCh:
-		return nil, nil, nil, err
-	default:
-	}
-
-	// TODO add option to include src pkgs
-	// TODO better way of parallelizing graph build
-	depOnlyPkg := graph.DepOnlyPkg(g)
-	llbdef, err := depOnlyPkg.State().Marshal(llb.LinuxAmd64)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	err = buildkit.Build(ctx, depOnlyPkg.ID(), llbdef, nil, unpack)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	err = graph.Walk(g, func(pkg graph.Pkg) error {
-		llbdef, err := pkg.State().Marshal(llb.LinuxAmd64)
-		if err != nil {
-			return err
-		}
-
-		err = buildkit.Build(ctx, pkg.ID(), llbdef, nil, unpack)
-		if err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	return ctx, cancel, imageBackend, nil
-}
-
-func graphToCtr(
-	g graph.Graph,
-	ctrState ctr.ContainerState,
-	upperDir string,
-) (ctr.Container, error) {
-	ctrName := ctrState.ContainerID()
-
-	ctx, cancel, imageBackend, err := buildGraph(g, true)
-	if err != nil {
-		return nil, err
-	}
-	defer cancel()
-
-	ctrMounts := ctr.Mounts(nil)
-	for _, pkg := range graph.Tsort(g) {
-		image, err := imageBackend.ImageStore.Get(ctx, pkg.ID())
-		if err != nil {
-			panic("TODO")
-		}
-
-		ids, err := image.RootFS(ctx, imageBackend.ContentStore, nil)
-		if err != nil {
-			panic("TODO")
-		}
-
-		parentRef := identity.ChainID(ids).String()
-		mntable, err := imageBackend.Snapshotter.View(ctx,
-			pkg.ID()+"-view-"+bkIdentity.NewID(), parentRef)
-		if err != nil {
-			panic("TODO")
-		}
-
-		diffMnts, cleanupMnt, err := mntable.Mount()
-		if err != nil {
-			panic("TODO")
-		}
-		// cleanupMnt just decrements buildkit's ref counter.
-		defer cleanupMnt()
-
-		pkgDest := graph.MountDirOf(pkg)
-		for _, diffMnt := range diffMnts {
-			mntable, err := ctr.AsMergedMount(ctr.ReplaceOption(oci.Mount{
-				Source:      filepath.Join(diffMnt.Source, graph.OutputDirOf(pkg)),
-				Destination: pkgDest,
-				Type:        diffMnt.Type,
-				Options:     diffMnt.Options,
-			}, "rbind", "bind"), filepath.Join(
-				upperDir,
-				base64.RawURLEncoding.EncodeToString([]byte(pkgDest)),
-			))
-			if err != nil {
-				panic("TODO")
-			}
-			ctrMounts = ctrMounts.With(mntable)
-		}
-	}
-
-	ctrMounts = ctrMounts.With(ctr.DefaultMounts()...).With(
-		ctr.BindMount{
-			Dest:     "/etc/resolv.conf",
-			Source:   "/etc/resolv.conf",
-			Readonly: true,
-		},
-		ctr.BindMount{
-			Dest:     "/etc/hosts",
-			Source:   "/etc/hosts",
-			Readonly: true,
-		},
-		ctr.BindMount{
-			Dest:   "/run/ssh-agent.sock",
-			Source: "/run/ssh-agent.sock",
-		},
-		ctr.BindMount{
-			Dest:     "/self",
-			Source:   "/self",
-			Readonly: true,
-		},
-		ctr.BindMount{
-			Dest:   "/home/sipsma/.bincastle",
-			Source: ctrState.InnerDir(),
-		},
-	)
-
-	// TODO most of the below needs to be configurable, not hardcoded
-	return ctrState.Start(ctr.ContainerDef{
-		ContainerProc: ctr.ContainerProc{
-			Args: []string{"/bin/bash", "-l"},
-			Env: []string{
-				"PATH=" + strings.Join([]string{
-					"/bin",
-					"/sbin",
-					"/usr/bin",
-					"/usr/sbin",
-					"/usr/local/bin",
-					"/usr/local/sbin",
-					"/usr/lib/go/bin",
-				}, ":"),
-				"SSH_AUTH_SOCK=/run/ssh-agent.sock",
-				"TERM=xterm-24bit",
-				"LANG=en_US.UTF-8",
-				"DEVCASTLE_NAME=" + ctrName,
-			},
-			WorkingDir:   "/home/sipsma",
-			Uid:          0,
-			Gid:          0,
-			Capabilities: &ctr.AllCaps,
-		},
-		Hostname: ctrName,
-		Mounts:   ctrMounts,
-	})
 }

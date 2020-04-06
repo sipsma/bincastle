@@ -1520,6 +1520,8 @@ func (d distro) HomeDir() Pkg {
 			// TODO this should be its own package
 			`export GO111MODULE=on`,
 			`go get golang.org/x/tools/gopls@latest`,
+
+			`ln -s /inner /home/sipsma/.bincastle`,
 		),
 	).With(
 		Name("homedir"),
@@ -1569,7 +1571,7 @@ func (d distro) HomeDir() Pkg {
 	)
 }
 
-func Bootstrap(bootstrapGraph Graph) Graph {
+func Bootstrap(bootstrapGraph Graph) Pkg {
 	defaultBuildOpts := []llb.RunOption{
 		// TODO should this really be hardcoded?
 		// maybe something smaller than "all cpus" would be a better default...
@@ -1789,5 +1791,23 @@ func Bootstrap(bootstrapGraph Graph) Graph {
 		distroSources: sources,
 	})
 
-	return TrimGraphs(distroGraph, patchedTmp, baseSystem)
+	return DefaultPkger().Exec(
+		BuildDeps(TrimGraphs(distroGraph, patchedTmp, baseSystem)),
+		llb.AddEnv("PATH", strings.Join([]string{
+			"/bin",
+			"/sbin",
+			"/usr/bin",
+			"/usr/sbin",
+			"/usr/local/bin",
+			"/usr/local/sbin",
+			"/usr/lib/go/bin",
+		}, ":")),
+		llb.AddEnv("SSH_AUTH_SOCK", "/run/ssh-agent.sock"),
+		llb.AddEnv("TERM", "xterm-24bit"),
+		llb.AddEnv("LANG", "en_US.UTF-8"),
+		llb.AddEnv("BINCASTLE_INTERACTIVE", "home"),
+		llb.Dir("/home/sipsma"),
+		llb.Args([]string{"/bin/bash", "-l"}),
+		llb.IgnoreCache,
+	)
 }

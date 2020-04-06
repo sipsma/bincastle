@@ -13,7 +13,7 @@ func init() {
 
 // TODO make this an actual example, show how to customize packages/options/etc.
 func main() {
-	cmdgen.CmdMain(map[string]graph.Graph{
+	cmdgen.CmdMain(map[string]graph.Pkg{
 		"system": distro.Bootstrap(
 			graph.Import(llb.Image("localhost:5000/bootstrap:latest"))),
 	})

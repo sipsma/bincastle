@@ -6,10 +6,12 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/containerd/containerd/content"
@@ -72,7 +74,7 @@ ff02::2 ip6-allrouters
 `
 
 var (
-	root   = "/var/lib/buildkitd"
+	Root   = "/var/lib/buildkitd"
 	socket = filepath.Join("/var/run", "buildkitd.sock")
 
 	allowCfg = []string{"security.insecure", "network.host"}
@@ -201,13 +203,13 @@ func Buildkitd(ctx context.Context) (<-chan error, *ImageBackend) {
 		grpc.MaxSendMsgSize(268435456),
 	)
 
-	err = os.MkdirAll(root, 0700)
+	err = os.MkdirAll(Root, 0700)
 	if err != nil {
-		err = errors.Wrapf(err, "failed to create %s", root)
+		err = errors.Wrapf(err, "failed to create %s", Root)
 		return errCh, nil
 	}
 
-	lockPath := filepath.Join(root, "buildkitd.lock")
+	lockPath := filepath.Join(Root, "buildkitd.lock")
 	lock := flock.New(lockPath)
 	locked, err := lock.TryLock()
 	if err != nil {
@@ -292,8 +294,7 @@ func newController() (*control.Controller, func() error, *ImageBackend, error) {
 		"local":    localremotecache.ResolveCacheImporterFunc(sessionManager),
 	}
 
-	// TODO there is a bolt db open in here that you can't close...
-	cacheStorage, err := bboltcachestorage.NewStore(filepath.Join(root, "cache.db"))
+	cacheStorage, err := bboltcachestorage.NewStore(filepath.Join(Root, "cache.db"))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -317,7 +318,7 @@ func newController() (*control.Controller, func() error, *ImageBackend, error) {
 func newWorkerController() (*worker.Controller, func() error, *ImageBackend, error) {
 	wc := &worker.Controller{}
 
-	workers, cleanup, imageBackend, err := RuncWorkers(root, gcKeepStorage)
+	workers, cleanup, imageBackend, err := RuncWorkers(Root, gcKeepStorage)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -430,7 +431,7 @@ func runcWorker(
 		Platforms:       []imageSpec.Platform{platforms.Normalize(platforms.DefaultSpec())},
 		IdentityMapping: nil,
 		LeaseManager:    leaseManager,
-		RegistryHosts: resolverFn,
+		RegistryHosts:   resolverFn,
 		GarbageCollect: func(context.Context) (gc.Stats, error) {
 			// TODO this just disable gc right?
 			return nil, nil
@@ -531,27 +532,32 @@ func (e *runcExecutor) Exec(
 	execMounts []executor.Mount,
 	stdin io.ReadCloser,
 	stdout, stderr io.WriteCloser,
-) error {
-	var releaseFuncs []func() error
-	release := func() error {
-		var err *multierror.Error
-		for _, f := range releaseFuncs {
-			err = multierror.Append(err, f())
-		}
-		return err.ErrorOrNil()
-	}
+) (rerr error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
+	sigchan := make(chan os.Signal, 1)
+	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		defer cancel()
+		<-sigchan
+	}()
+
+	envMap := toEnvMap(meta.Env)
 	rootIsReadOnly := false
 
 	rootSnapshotMountable, err := root.Mount(ctx, rootIsReadOnly)
 	if err != nil {
-		return multierror.Append(err, release()).ErrorOrNil()
+		return err
 	}
 	rootMounts, rootSnapshotCleanup, err := rootSnapshotMountable.Mount()
 	if err != nil {
-		return multierror.Append(err, release()).ErrorOrNil()
+		return err
 	}
-	releaseFuncs = append([]func() error{rootSnapshotCleanup}, releaseFuncs...)
+	defer func() {
+		rerr = multierror.Append(rerr, rootSnapshotCleanup()).ErrorOrNil()
+	}()
+
 	// TODO safe to ignore multiple mounts?
 	finalUpperDir := rootMounts[0].Source
 
@@ -592,22 +598,34 @@ func (e *runcExecutor) Exec(
 		mountsByDest[dest] = mountList
 	}
 
+
+	execID := identity.NewID()
+	var isInteractive bool
+	if interactiveID, ok := envMap["BINCASTLE_INTERACTIVE"]; ok {
+		execID = interactiveID
+		isInteractive = true
+	}
+
+	ctrState := ctr.ContainerStateRoot(e.execsDir()).ContainerState(execID)
+
 	ctrMounts := ctr.Mounts(nil)
 	for dest, mountList := range mountsByDest {
 		for _, execMount := range mountList {
 			snapshotMountable, err := execMount.Src.Mount(ctx, execMount.Readonly)
 			if err != nil {
-				return multierror.Append(err, release()).ErrorOrNil()
+				return err
 			}
 			cacheMounts, snapshotCleanup, err := snapshotMountable.Mount()
 			if err != nil {
-				return multierror.Append(err, release()).ErrorOrNil()
+				return err
 			}
-			releaseFuncs = append([]func() error{snapshotCleanup}, releaseFuncs...)
+			defer func() {
+				rerr = multierror.Append(rerr, snapshotCleanup()).ErrorOrNil()
+			}()
 
 			for _, cacheMount := range cacheMounts {
 				newMount := ociSpec.Mount{
-					Source:      filepath.Join(
+					Source: filepath.Join(
 						cacheMount.Source, execMount.Selector),
 					Destination: dest,
 					Type:        cacheMount.Type,
@@ -620,7 +638,7 @@ func (e *runcExecutor) Exec(
 					mntable, err = ctr.AsMergedMount(
 						ctr.ReplaceOption(newMount, "rbind", "bind"), "")
 					if err != nil {
-						return multierror.Append(err, release()).ErrorOrNil()
+						return err
 					}
 				} else {
 					mntable = ctr.OCIMount(newMount)
@@ -629,9 +647,6 @@ func (e *runcExecutor) Exec(
 			}
 		}
 	}
-
-	execID := identity.NewID()
-	ctrState := ctr.ContainerStateRoot(e.execsDir()).ContainerState(execID)
 
 	container, err := ctrState.Start(ctr.ContainerDef{
 		ContainerProc: ctr.ContainerProc{
@@ -643,7 +658,7 @@ func (e *runcExecutor) Exec(
 			Capabilities: &ctr.AllCaps, // TODO don't hardcode
 		},
 		Hostname: "bincastle",
-		Mounts:   ctrMounts.With(ctr.DefaultMounts()...).With(
+		Mounts: ctrMounts.With(ctr.DefaultMounts()...).With(
 			ctr.BindMount{
 				Dest:     "/etc/resolv.conf",
 				Source:   e.resolvConfPath(),
@@ -655,25 +670,55 @@ func (e *runcExecutor) Exec(
 				Readonly: true,
 			},
 			ctr.BindMount{
-				Dest:     "/run/ssh-agent.sock",
-				Source:   "/run/ssh-agent.sock",
+				Dest:   "/run/ssh-agent.sock",
+				Source: "/run/ssh-agent.sock",
+			},
+			ctr.BindMount{
+				Dest:     "/self",
+				Source:   "/self",
+				Readonly: true,
+			},
+			ctr.BindMount{
+				Dest:   "/inner",
+				Source: ctrState.InnerDir(),
 			},
 		),
-	})
+	}, isInteractive)
 	if err != nil {
-		return multierror.Append(err, release()).ErrorOrNil()
+		return err
 	}
-	releaseFuncs = append([]func() error{func() error {
-		// TODO use a time out ctx. Don't want to ues existing ctx
-		// in case it has been canceled
-		return container.Destroy(context.Background())
-	}}, releaseFuncs...)
+	defer func() {
+		rerr = multierror.Append(rerr, container.Destroy(context.TODO())).ErrorOrNil()
+	}()
 
-	go container.Attach(ctx, stdin, stdout)
+	attachDone := make(chan struct{})
+	go func() {
+		defer close(attachDone)
+		var attachErr error
+		if isInteractive {
+			attachErr = ctr.AttachConsole(ctx, container)
+		} else {
+			attachErr = container.Attach(ctx, stdin, stdout)
+		}
+		if attachErr != nil && attachErr != context.Canceled {
+			fmt.Printf("error during container io attach: %v\n", attachErr)
+		}
+	}()
+	defer func() {
+		cancel()
+		<-attachDone
+	}()
+
 	waitResult := container.Wait(ctx)
 	if waitResult.Err != nil {
-		err = fmt.Errorf("exec returned non-zero exit code: %w", waitResult.Err)
-		return multierror.Append(err, release()).ErrorOrNil()
+		return err
+	}
+
+	// TODO if the container is interactive it should be using llb.IgnoreCache anyways
+	// and we shouldn't be exporting any changes to the cache, so return early in that
+	// case. This is a bit ugly though.
+	if isInteractive {
+		return nil
 	}
 
 	for dest, diffDir := range container.DiffDirs() {
@@ -685,12 +730,12 @@ func (e *runcExecutor) Exec(
 		// TODO how to ensure the right permissions
 		err = os.MkdirAll(rootDest, 0700)
 		if err != nil {
-			return multierror.Append(err, release()).ErrorOrNil()
+			return err
 		}
 
 		err = fs.CopyDir(rootDest, diffDir)
 		if err != nil {
-			return multierror.Append(err, release()).ErrorOrNil()
+			return err
 		}
 
 		// TODO there appears to be bug in the CopyDir function where
@@ -728,9 +773,18 @@ func (e *runcExecutor) Exec(
 			return nil
 		})
 		if err != nil {
-			return multierror.Append(err, release()).ErrorOrNil()
+			return err
 		}
 	}
 
-	return release()
+	return nil
+}
+
+func toEnvMap(envList []string) map[string]string {
+	m := make(map[string]string)
+	for _, env := range envList {
+		kv := strings.SplitN(env, "=", 2)
+		m[kv[0]] = kv[1]
+	}
+	return m
 }

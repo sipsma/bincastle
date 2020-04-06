@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -87,10 +88,6 @@ func (d ContainerStateRoot) ContainerState(containerID string) ContainerState {
 	return ContainerState(filepath.Join(string(d), containerID))
 }
 
-func (d ContainerStateRoot) PersistentUpperDir(containerID string) string {
-	return filepath.Join(string(d), "upper", containerID)
-}
-
 type ContainerState string
 
 func (d ContainerState) RuncStateDir() string {
@@ -114,8 +111,12 @@ func (d ContainerState) lowerDirSymlink(index uint) string {
 	return filepath.Join(d.rootfsDir(), strconv.Itoa(int(index)))
 }
 
+func (d ContainerState) overlayDirs() string {
+	return filepath.Join(string(d), "overlays")
+}
+
 func (d ContainerState) OverlayDir(ctrPath string) OverlayDir {
-	return OverlayDir(filepath.Join(string(d), "overlays",
+	return OverlayDir(filepath.Join(d.overlayDirs(),
 		base64.RawURLEncoding.EncodeToString([]byte(ctrPath))))
 }
 
@@ -150,19 +151,25 @@ func (d ContainerState) ContainerExists() bool {
 	return err == nil
 }
 
-func (d ContainerState) Start(def ContainerDef) (Container, error) {
+func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error) {
 	if d.ContainerExists() {
 		return nil, ContainerExistsError{d.ContainerID()}
 	}
 
 	cleanups := CleanupStack(nil).Push(func() error {
-		return os.RemoveAll(string(d))
+		if !persist {
+			return os.RemoveAll(string(d))
+		}
+		return os.RemoveAll(d.RuncStateDir())
 	})
 
 	err := os.MkdirAll(string(d.IODir()), 0700)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create container io dir: %w", err)
 	}
+	cleanups = cleanups.Push(func() error {
+		return os.RemoveAll(string(d.IODir()))
+	})
 
 	err = os.MkdirAll(d.InnerDir(), 0700)
 	if err != nil {
@@ -173,6 +180,9 @@ func (d ContainerState) Start(def ContainerDef) (Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create container rootfs dir: %w", err)
 	}
+	cleanups = cleanups.Push(func() error {
+		return os.RemoveAll(d.rootfsDir())
+	})
 
 	mounts, err := def.Mounts.OCIMounts(d)
 	if err != nil {
@@ -198,12 +208,18 @@ func (d ContainerState) Start(def ContainerDef) (Container, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create work dir: %w", err)
 		}
+		cleanups = cleanups.Push(func() error {
+			return os.RemoveAll(overlayOpts.WorkDir)
+		})
 
 		err = os.MkdirAll(overlayDir.PrivateDir(), 0700)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"failed to create private lower dir: %w", err)
 		}
+		cleanups = cleanups.Push(func() error {
+			return os.RemoveAll(overlayDir.PrivateDir())
+		})
 
 		if i < len(sortedMounts)-1 {
 			for _, laterMount := range sortedMounts[i+1:] {
@@ -464,6 +480,9 @@ func (d ContainerState) Start(def ContainerDef) (Container, error) {
 	if err != nil {
 		return nil, err
 	}
+	cleanups = cleanups.Push(func() error {
+		return os.RemoveAll(d.RuncStateDir())
+	})
 
 	err = c.Run(&runcProc)
 	if err != nil {
@@ -551,6 +570,10 @@ type container struct {
 	cleanupStack    CleanupStack
 	mounts          map[string]oci.Mount
 	consoleResizeCh chan<- console.WinSize
+
+	waitOnce sync.Once
+	waitCh chan struct{}
+	waitResult WaitResult
 }
 
 func (c *container) DiffDirs() map[string]string {
@@ -564,35 +587,36 @@ func (c *container) DiffDirs() map[string]string {
 	return diffDirs
 }
 
-func (c *container) Destroy(ctx context.Context) error {
-	return multierror.Append(
-		func() error {
-			err := c.runcCtr.Signal(syscall.SIGTERM, false)
-			if err != nil {
-				runcErr, ok := err.(libcontainer.Error)
-				if !ok || runcErr.Code() != libcontainer.ContainerNotRunning {
-					return fmt.Errorf("failed to SIGTERM container: %w", err)
-				}
+func (c *container) Destroy(ctx context.Context) (rerr error) {
+	for _, sig := range []os.Signal{syscall.SIGTERM, syscall.SIGKILL} {
+		err := c.runcCtr.Signal(sig, false)
+		if err != nil {
+			runcErr, ok := err.(libcontainer.Error)
+			if ok && runcErr.Code() == libcontainer.ContainerNotRunning {
+				break
 			}
+		}
 
-			timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second) // TODO don't hardcode
-			defer cancel()
-			waitResult := c.Wait(timeoutCtx)
-			if waitResult.Err == context.DeadlineExceeded {
-				return fmt.Errorf("timed out waiting for container shutdown after SIGTERM, will send SIGKILL: %w", waitResult.Err)
-			}
-			return nil
-		}(),
-		func() error {
-			// TODO use ctx to enforce timeout
-			err := c.runcCtr.Destroy()
-			if err != nil {
-				return fmt.Errorf("failed to destroy container: %w", err)
-			}
-			return nil
-		}(),
-		c.cleanupStack.Cleanup(),
-	)
+		timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second) // TODO don't hardcode
+		defer cancel()
+		waitResult := c.Wait(timeoutCtx)
+		if waitResult.Err == nil {
+			break
+		}
+		fmt.Printf("error waiting for container shutdown after signal %q: %v\n",
+			sig.String(), waitResult.Err)
+	}
+
+	defer func() {
+		rerr = multierror.Append(rerr, c.cleanupStack.Cleanup()).ErrorOrNil()
+	}()
+
+	err := c.runcCtr.Destroy()
+	if err != nil {
+		return fmt.Errorf("failed to destroy container: %w", err)
+	}
+
+	return nil
 }
 
 func (c *container) Attach(ctx context.Context, in io.Reader, out io.Writer) error {
@@ -653,50 +677,42 @@ func AttachConsole(ctx context.Context, attacher Attachable) error {
 		attachCh <- attacher.Attach(ctx, os.Stdin, os.Stdout)
 	}()
 
-	// TODO need more configurable signal handling
-	// Handling SIG{INT,TERM,HUP} ensures that we reset the console
-	// before the process exits. If you don't, when you drop back
-	// to a shell it behaves very "raw" (which is to say, weird).
 	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan,
-		syscall.SIGWINCH,
-		syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP,
-	)
+	signal.Notify(sigchan, syscall.SIGWINCH)
 
 	for {
 		select {
 		case err := <-attachCh:
 			return err
-		case sig := <-sigchan:
-			if unixSig, ok := sig.(syscall.Signal); ok && unixSig == syscall.SIGWINCH {
-				newSize, err := stdinConsole.Size()
-				if err != nil {
-					fmt.Printf("failed to get tty size after SIGWINCH: %v\n", err)
-				} else {
-					attacher.Resize(newSize)
-				}
+		case <-sigchan:
+			newSize, err := stdinConsole.Size()
+			if err != nil {
+				fmt.Printf("failed to get tty size after SIGWINCH: %v\n", err)
 			} else {
-				return fmt.Errorf("received signal %q during console attach", sig)
+				attacher.Resize(newSize)
 			}
 		}
 	}
 }
 
 func (c *container) Wait(ctx context.Context) WaitResult {
-	waitCh := make(chan WaitResult)
-	go func() {
-		state, err := c.initProc.Wait()
-		exitCode := state.ExitCode()
-		if exitCode != 0 && exitCode != -1 {
-			err = multierror.Append(err, fmt.Errorf(
-				"container exited with non-zero status %d", exitCode)).ErrorOrNil()
-		}
-		waitCh <- WaitResult{State: state, Err: err}
-	}()
+	c.waitOnce.Do(func() {
+		c.waitCh = make(chan struct{})
+		go func() {
+			defer close(c.waitCh)
+			state, err := c.initProc.Wait()
+			exitCode := state.ExitCode()
+			if exitCode != 0 && exitCode != -1 {
+				err = multierror.Append(err, fmt.Errorf(
+					"container exited with non-zero status %d", exitCode)).ErrorOrNil()
+			}
+			c.waitResult = WaitResult{State: state, Err: err}
+		}()
+	})
 
 	select {
-	case waitResult := <-waitCh:
-		return waitResult
+	case <-c.waitCh:
+		return c.waitResult
 	case <-ctx.Done():
 		return WaitResult{Err: ctx.Err()}
 	}
