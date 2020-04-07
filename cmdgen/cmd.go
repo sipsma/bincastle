@@ -72,9 +72,13 @@ func CmdMain(pkgs map[string]graph.Pkg) {
 						return err
 					}
 
-					ctrState := ctr.ContainerStateRoot(
-						filepath.Join(homeDir, ".bincastle", "ctrs"),
-					).ContainerState(ctrName)
+					ctrStateDir, err := filepath.EvalSymlinks(
+						filepath.Join(homeDir, ".bincastle", "ctrs"))
+					if err != nil {
+						return fmt.Errorf(
+							"failed to evaluate symlinks in container state root dir: %w", err)
+					}
+					ctrState := ctr.ContainerStateRoot(ctrStateDir).ContainerState(ctrName)
 
 					container, err := ctrState.Start(ctr.ContainerDef{
 						// /self is this process's /proc/self/exe ro-bind mounted
