@@ -711,7 +711,7 @@ func (e *runcExecutor) Exec(
 
 	waitResult := container.Wait(ctx)
 	if waitResult.Err != nil {
-		return err
+		return waitResult.Err
 	}
 
 	// TODO if the container is interactive it should be using llb.IgnoreCache anyways

@@ -156,18 +156,19 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 		return nil, ContainerExistsError{d.ContainerID()}
 	}
 
-	cleanups := CleanupStack(nil).Push(func() error {
+	prekillCleanups := CleanupStack(nil)
+	postkillCleanups := CleanupStack(nil).Push(func() error {
 		if !persist {
 			return os.RemoveAll(string(d))
 		}
-		return os.RemoveAll(d.RuncStateDir())
+		return nil
 	})
 
 	err := os.MkdirAll(string(d.IODir()), 0700)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create container io dir: %w", err)
 	}
-	cleanups = cleanups.Push(func() error {
+	postkillCleanups = postkillCleanups.Push(func() error {
 		return os.RemoveAll(string(d.IODir()))
 	})
 
@@ -180,7 +181,7 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create container rootfs dir: %w", err)
 	}
-	cleanups = cleanups.Push(func() error {
+	postkillCleanups = postkillCleanups.Push(func() error {
 		return os.RemoveAll(d.rootfsDir())
 	})
 
@@ -208,7 +209,7 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create work dir: %w", err)
 		}
-		cleanups = cleanups.Push(func() error {
+		postkillCleanups = postkillCleanups.Push(func() error {
 			return os.RemoveAll(overlayOpts.WorkDir)
 		})
 
@@ -217,7 +218,7 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 			return nil, fmt.Errorf(
 				"failed to create private lower dir: %w", err)
 		}
-		cleanups = cleanups.Push(func() error {
+		postkillCleanups = postkillCleanups.Push(func() error {
 			return os.RemoveAll(overlayDir.PrivateDir())
 		})
 
@@ -324,13 +325,13 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tty console sock: %w", err)
 	}
-	cleanups = cleanups.Push(ctrConsoleSock.Close)
+	prekillCleanups = prekillCleanups.Push(ctrConsoleSock.Close)
 
 	epoller, err := console.NewEpoller()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create epoller: %w", err)
 	}
-	cleanups = cleanups.Push(epoller.Close)
+	prekillCleanups = prekillCleanups.Push(epoller.Close)
 
 	consoleResizeCh := make(chan console.WinSize)
 	go func() {
@@ -480,7 +481,7 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 	if err != nil {
 		return nil, err
 	}
-	cleanups = cleanups.Push(func() error {
+	postkillCleanups = postkillCleanups.Push(func() error {
 		return os.RemoveAll(d.RuncStateDir())
 	})
 
@@ -493,7 +494,8 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 		state:           d,
 		initProc:        runcProc,
 		runcCtr:         c,
-		cleanupStack:    cleanups,
+		prekillCleanup:  prekillCleanups,
+		postkillCleanup: postkillCleanups,
 		mounts:          mounts,
 		consoleResizeCh: consoleResizeCh,
 	}, nil
@@ -567,12 +569,14 @@ type container struct {
 	state           ContainerState
 	initProc        libcontainer.Process
 	runcCtr         libcontainer.Container
-	cleanupStack    CleanupStack
 	mounts          map[string]oci.Mount
 	consoleResizeCh chan<- console.WinSize
 
-	waitOnce sync.Once
-	waitCh chan struct{}
+	prekillCleanup  CleanupStack
+	postkillCleanup CleanupStack
+
+	waitOnce   sync.Once
+	waitCh     chan struct{}
 	waitResult WaitResult
 }
 
@@ -588,6 +592,8 @@ func (c *container) DiffDirs() map[string]string {
 }
 
 func (c *container) Destroy(ctx context.Context) (rerr error) {
+	rerr = multierror.Append(rerr, c.prekillCleanup.Cleanup()).ErrorOrNil()
+
 	for _, sig := range []os.Signal{syscall.SIGTERM, syscall.SIGKILL} {
 		err := c.runcCtr.Signal(sig, false)
 		if err != nil {
@@ -607,16 +613,12 @@ func (c *container) Destroy(ctx context.Context) (rerr error) {
 			sig.String(), waitResult.Err)
 	}
 
-	defer func() {
-		rerr = multierror.Append(rerr, c.cleanupStack.Cleanup()).ErrorOrNil()
-	}()
-
 	err := c.runcCtr.Destroy()
 	if err != nil {
-		return fmt.Errorf("failed to destroy container: %w", err)
+		rerr = multierror.Append(rerr, fmt.Errorf("failed to destroy container: %w", err))
 	}
 
-	return nil
+	return multierror.Append(rerr, c.postkillCleanup.Cleanup()).ErrorOrNil()
 }
 
 func (c *container) Attach(ctx context.Context, in io.Reader, out io.Writer) error {
