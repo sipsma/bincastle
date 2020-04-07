@@ -1487,6 +1487,7 @@ func (d distro) HomeDir() Pkg {
 			d.Bash(),
 			d.CACerts(),
 			d.Golang(),
+			d.Git(),
 			d.Users(),
 		),
 		ScratchMount("/build"),
@@ -1520,6 +1521,9 @@ func (d distro) HomeDir() Pkg {
 			// TODO this should be its own package
 			`export GO111MODULE=on`,
 			`go get golang.org/x/tools/gopls@latest`,
+
+			`git config --global user.name "Erik Sipsma"`,
+			`git config --global user.email "erik@sipsma.dev"`,
 
 			`ln -s /inner /home/sipsma/.bincastle`,
 		),
