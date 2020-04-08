@@ -10,14 +10,13 @@ import (
 	"github.com/moby/buildkit/client/llb"
 )
 
-// TODO don't hardcode bash
 func Shell(lines ...string) llb.RunOption {
-	lines = append([]string{`set -e`, `set +h`}, lines...)
+	lines = append([]string{`set -e`}, lines...)
 	return llb.Args([]string{
-		"bash", "-e", "-c", fmt.Sprintf(
+		"sh", "-e", "-c", fmt.Sprintf(
 			// TODO using THEREALEOF allows callers to use <<EOF in their
 			// own shell lines, but is there a better way?
-			"exec bash <<\"THEREALEOF\"\n%s\nTHEREALEOF",
+			"exec sh <<\"THEREALEOF\"\n%s\nTHEREALEOF",
 			strings.Join(lines, "\n"),
 		),
 	})

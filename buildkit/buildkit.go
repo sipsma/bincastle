@@ -86,9 +86,10 @@ var (
 		Paths: []string{"/run/ssh-agent.sock"},
 	}
 
+	insecure = true
 	resolverFn = resolver.NewRegistryConfig(map[string]resolver.RegistryConf{
 		"docker.io": resolver.RegistryConf{
-			Mirrors: []string{"hub.docker.io"},
+			Insecure: &insecure, // TODO getting unknown CA errors without this, need better fix
 		},
 	})
 )

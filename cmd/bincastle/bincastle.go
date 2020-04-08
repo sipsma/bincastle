@@ -1,4 +1,4 @@
-package cmdgen
+package main
 
 import (
 	"context"
@@ -12,10 +12,13 @@ import (
 	"github.com/containerd/containerd/namespaces"
 	"github.com/hashicorp/go-multierror"
 	"github.com/moby/buildkit/client/llb"
+	"github.com/moby/buildkit/client/llb/llbbuild"
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/sipsma/bincastle/buildkit"
 	"github.com/sipsma/bincastle/ctr"
+	"github.com/sipsma/bincastle/distro/src"
 	"github.com/sipsma/bincastle/graph"
+	"github.com/sipsma/bincastle/util"
 	"github.com/urfave/cli"
 	"golang.org/x/sys/unix"
 
@@ -23,22 +26,19 @@ import (
 )
 
 const (
-	// external
-	runArg   = "run"
-	cleanArg = "clean"
+	ctrName = "system"
 
-	// internal
+	runArg         = "run"
 	internalRunArg = "internalRun"
+	cleanArg       = "clean"
 )
 
 var (
-	sshOpts = []llb.SSHOption{llb.SSHID("git"), llb.SSHSocketTarget("/ssh-agent.sock")}
-
 	homeDir      = os.Getenv("HOME")
 	sshAgentSock = os.Getenv("SSH_AUTH_SOCK")
 )
 
-func CmdInit() {
+func init() {
 	if len(os.Args) > 1 && os.Args[1] == ctr.RuncInitArg {
 		runtime.GOMAXPROCS(1)
 		runtime.LockOSThread()
@@ -48,7 +48,7 @@ func CmdInit() {
 	}
 }
 
-func CmdMain(pkgs map[string]graph.Pkg) {
+func main() {
 	selfBin, err := os.Readlink("/proc/self/exe")
 	if err != nil {
 		panic(err)
@@ -60,20 +60,19 @@ func CmdMain(pkgs map[string]graph.Pkg) {
 				Name:  runArg,
 				Usage: "start the system in a rootless container",
 				Action: func(c *cli.Context) (err error) {
-					ctrName := c.Args().First()
-					if pkgs[ctrName] == nil {
-						// TODO more helpful message
-						return fmt.Errorf("name %q has no associated graph", ctrName)
-					}
-
 					varDir := filepath.Join(homeDir, ".bincastle", "var")
 					err = os.MkdirAll(varDir, 0700)
 					if err != nil {
 						return err
 					}
 
-					ctrStateDir, err := filepath.EvalSymlinks(
-						filepath.Join(homeDir, ".bincastle", "ctrs"))
+					ctrsDir := filepath.Join(homeDir, ".bincastle", "ctrs")
+					err = os.MkdirAll(ctrsDir, 0700)
+					if err != nil {
+						return err
+					}
+
+					ctrStateDir, err := filepath.EvalSymlinks(ctrsDir)
 					if err != nil {
 						return fmt.Errorf(
 							"failed to evaluate symlinks in container state root dir: %w", err)
@@ -92,9 +91,7 @@ func CmdMain(pkgs map[string]graph.Pkg) {
 						// /self and use that to self-exec rather than
 						// /proc/self/exe
 						ContainerProc: ctr.ContainerProc{
-							Args: []string{"/self",
-								internalRunArg, ctrName,
-							},
+							Args: append([]string{"/self", internalRunArg}, c.Args()...),
 							Env: []string{
 								"SSH_AUTH_SOCK=/run/ssh-agent.sock",
 							},
@@ -174,8 +171,9 @@ func CmdMain(pkgs map[string]graph.Pkg) {
 				Name:   internalRunArg,
 				Hidden: true,
 				Action: func(c *cli.Context) (err error) {
-					ctrName := c.Args().First()
-					pkg := pkgs[ctrName]
+					gitUrl := c.Args().Get(0)
+					gitRef := c.Args().Get(1)
+					cmdPath := c.Args().Get(2)
 
 					ctrStateRoot := ctr.ContainerStateRoot("/var/ctrs")
 					ctrState := ctrStateRoot.ContainerState(ctrName)
@@ -195,7 +193,37 @@ func CmdMain(pkgs map[string]graph.Pkg) {
 					default:
 					}
 
-					llbdef, err := pkg.State().Marshal(llb.LinuxAmd64)
+					golangBase := graph.Import(llb.Image("docker.io/eriksipsma/golang-singleuser:latest"))
+					// TODO need to clean this interface up a lot... way too verbose
+					llbSrc := src.Git(graph.DefaultPkger(
+						llb.AddEnv("PATH", "/bin:/sbin:/usr/bin"),
+						graph.BuildDeps(
+							graph.DefaultPkger().Exec(
+								llb.AddEnv("PATH", "/bin:/sbin:/usr/bin"),
+								graph.BuildDeps(golangBase),
+								util.Shell(`/sbin/apk add git`),
+							).With(graph.RuntimeDeps(golangBase)),
+						),
+					), "llb-source", gitUrl, src.GitOpt{Ref: src.Ref(gitRef)})
+
+					llbdef, err := graph.DefaultPkger().Exec(
+						graph.BuildDeps(
+							golangBase,
+							llbSrc.With(graph.MountDir("/src")),
+						),
+						llb.AddEnv("GOPATH", "/go"),
+						llb.AddEnv("PATH", "/bin:/sbin:/usr/bin:/usr/local/go/bin:/go/bin"),
+						llb.AddEnv("GO111MODULE", "on"),
+						util.ScratchMount("/build"),
+						llb.Dir("/src"),
+						util.Shell(
+							`apk add build-base`,
+							fmt.Sprintf(`go build -o /build/llb %s`, filepath.Join("/src", cmdPath)),
+							`/build/llb > /llboutput`,
+						),
+					).State().With(
+						llbbuild.Build(llbbuild.WithFilename("/llboutput")),
+					).Marshal(llb.LinuxAmd64)
 					if err != nil {
 						return err
 					}
