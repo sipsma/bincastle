@@ -26,6 +26,7 @@ require (
 	github.com/containerd/continuity v0.0.0-20200228182428-0f16d7a0959c
 	github.com/containerd/fifo v0.0.0-20191213151349-ff969a566b00
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf // indirect
+	github.com/creack/pty v1.1.10
 	github.com/cyphar/filepath-securejoin v0.2.2 // indirect
 	github.com/docker/cli v0.0.0-20200320120634-22acbbcc4b3f // indirect
 	github.com/docker/docker v1.13.1 // indirect
