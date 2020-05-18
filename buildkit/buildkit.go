@@ -6,12 +6,11 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
 	"github.com/containerd/containerd/content"
@@ -86,7 +85,7 @@ var (
 		Paths: []string{"/run/ssh-agent.sock"},
 	}
 
-	insecure = true
+	insecure   = true
 	resolverFn = resolver.NewRegistryConfig(map[string]resolver.RegistryConf{
 		"docker.io": resolver.RegistryConf{
 			Insecure: &insecure, // TODO getting unknown CA errors without this, need better fix
@@ -189,25 +188,16 @@ func Build(
 	return eg.Wait()
 }
 
-func Buildkitd(ctx context.Context) (<-chan error, *ImageBackend) {
-	errCh := make(chan error, 1)
-	var err error
-	defer func() {
-		if err != nil {
-			errCh <- err
-			close(errCh)
-		}
-	}()
-
+func Buildkitd() (func(context.Context) error, error) {
 	server := grpc.NewServer(
 		grpc.MaxRecvMsgSize(268435456),
 		grpc.MaxSendMsgSize(268435456),
 	)
 
-	err = os.MkdirAll(Root, 0700)
+	err := os.MkdirAll(Root, 0700)
 	if err != nil {
 		err = errors.Wrapf(err, "failed to create %s", Root)
-		return errCh, nil
+		return nil, err
 	}
 
 	lockPath := filepath.Join(Root, "buildkitd.lock")
@@ -215,11 +205,11 @@ func Buildkitd(ctx context.Context) (<-chan error, *ImageBackend) {
 	locked, err := lock.TryLock()
 	if err != nil {
 		err = errors.Wrapf(err, "could not lock %s", lockPath)
-		return errCh, nil
+		return nil, err
 	}
 	if !locked {
 		err = errors.Errorf("could not lock %s, another instance running?", lockPath)
-		return errCh, nil
+		return nil, err
 	}
 	defer func() {
 		if err != nil {
@@ -228,45 +218,39 @@ func Buildkitd(ctx context.Context) (<-chan error, *ImageBackend) {
 		}
 	}()
 
-	// TODO call cleanup in all error cases
-	controller, cleanup, imageBackend, err := newController()
-	if err != nil {
-		err = errors.Wrap(err, "failed to create controller")
-		return errCh, nil
-	}
-
-	controller.Register(server)
-
 	uid := 0
 	gid := 0
 	listener, err := sys.GetLocalListener(socket, uid, gid)
 	if err != nil {
 		err = errors.Wrap(err, "failed to create listener")
-		return errCh, nil
+		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	// TODO call cleanup in all error cases
+	// TODO get rid of imageBackend?
+	controller, cleanup, _, err := newController()
+	if err != nil {
+		err = errors.Wrap(err, "failed to create controller")
+		return nil, err
+	}
 
-	go func() {
-		errCh <- server.Serve(listener)
-		close(errCh)
+	controller.Register(server)
 
-		cancel()
-	}()
+	return func(ctx context.Context) error {
+		defer func() {
+			// TODO log errors?
+			lock.Unlock()
+			os.RemoveAll(lockPath)
+		}()
 
-	go func() {
-		<-ctx.Done()
-		// server.Stop() // TODO graceful stop w/ timeout?
-		server.GracefulStop()
-		err := cleanup()
-		if err != nil {
-			fmt.Println(err.Error())
-		}
-		lock.Unlock()
-		os.RemoveAll(lockPath)
-	}()
+		go func() {
+			<-ctx.Done()
+			server.GracefulStop()
+		}()
 
-	return errCh, imageBackend
+		err := server.Serve(listener)
+		return multierror.Append(err, cleanup())
+	}, nil
 }
 
 func newController() (*control.Controller, func() error, *ImageBackend, error) {
@@ -455,6 +439,7 @@ func runcWorker(
 
 	// TODO do cleanup throughout the above function in case of error
 	return w, func() error {
+			newExecutor.Shutdown()
 			return multierror.Append(
 				db.Close(),
 				bkSnapshotter.Close(),
@@ -476,6 +461,9 @@ type ImageBackend struct {
 
 type runcExecutor struct {
 	stateRootDir string
+	execCount    int
+	execCond     *sync.Cond
+	shutdown     bool
 }
 
 func (e *runcExecutor) resolvConfPath() string {
@@ -490,12 +478,19 @@ func (e *runcExecutor) execsDir() string {
 	return filepath.Join(e.stateRootDir, "execs")
 }
 
+type Executor interface {
+	executor.Executor
+	Shutdown()
+}
+
 func newRuncExecutor(
 	stateRootDir string,
 	dnsConfig *oci.DNSConfig,
-) (executor.Executor, error) {
+) (Executor, error) {
+	var execMu sync.Mutex
 	newExecutor := &runcExecutor{
 		stateRootDir: stateRootDir,
+		execCond:     sync.NewCond(&execMu),
 	}
 
 	// TODO handle options
@@ -526,6 +521,16 @@ func newRuncExecutor(
 	return newExecutor, nil
 }
 
+func (e *runcExecutor) Shutdown() {
+	e.execCond.L.Lock()
+	e.shutdown = true
+	for e.execCount != 0 {
+		e.execCond.Wait()
+	}
+	e.execCond.L.Unlock()
+	return
+}
+
 func (e *runcExecutor) Exec(
 	ctx context.Context,
 	meta executor.Meta,
@@ -537,11 +542,18 @@ func (e *runcExecutor) Exec(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
-		defer cancel()
-		<-sigchan
+	e.execCond.L.Lock()
+	if e.shutdown {
+		e.execCond.L.Unlock()
+		return fmt.Errorf("cannot exec after executor shutdown")
+	}
+	e.execCount++
+	e.execCond.L.Unlock()
+	defer func() {
+		e.execCond.L.Lock()
+		defer e.execCond.L.Unlock()
+		e.execCount--
+		e.execCond.Broadcast()
 	}()
 
 	envMap := toEnvMap(meta.Env)
@@ -598,7 +610,6 @@ func (e *runcExecutor) Exec(
 		})
 		mountsByDest[dest] = mountList
 	}
-
 
 	execID := identity.NewID()
 	var isInteractive bool
@@ -688,97 +699,108 @@ func (e *runcExecutor) Exec(
 	if err != nil {
 		return err
 	}
-	defer func() {
-		rerr = multierror.Append(rerr, container.Destroy(context.TODO())).ErrorOrNil()
-	}()
 
-	attachDone := make(chan struct{})
+	ioctx, iocancel := context.WithCancel(context.Background())
+	goCount := 2
+	errCh := make(chan error, goCount)
+
 	go func() {
-		defer close(attachDone)
-		var attachErr error
-		if isInteractive {
-			attachErr = ctr.AttachConsole(ctx, container)
-		} else {
-			attachErr = container.Attach(ctx, stdin, stdout)
-		}
-		if attachErr != nil && attachErr != context.Canceled {
-			fmt.Printf("error during container io attach: %v\n", attachErr)
-		}
-	}()
-	defer func() {
-		cancel()
-		<-attachDone
-	}()
-
-	waitResult := container.Wait(ctx)
-	if waitResult.Err != nil {
-		return waitResult.Err
-	}
-
-	// TODO if the container is interactive it should be using llb.IgnoreCache anyways
-	// and we shouldn't be exporting any changes to the cache, so return early in that
-	// case. This is a bit ugly though.
-	if isInteractive {
-		return nil
-	}
-
-	for dest, diffDir := range container.DiffDirs() {
-		if discardChanges[dest] {
-			continue
-		}
-
-		rootDest := filepath.Join(finalUpperDir, dest)
-		// TODO how to ensure the right permissions
-		err = os.MkdirAll(rootDest, 0700)
-		if err != nil {
-			return err
-		}
-
-		err = fs.CopyDir(rootDest, diffDir)
-		if err != nil {
-			return err
-		}
-
-		// TODO there appears to be bug in the CopyDir function where
-		// whiteouts get copied as regular empty files. I was able
-		// to fix that by using the filemode as returned by the actual
-		// stat (instead of go's FileMode), but then discovered there
-		// was yet another issue where char devices can't be made in
-		// unpriv user namespaces...
-		// Hardlink works though! Not really concerned about
-		// crossing filesystems at this point, everything is
-		// expected to use a single underlying fs.
-		// Should fix the issue upstream in continuity either way though
-		// if it turns out to be real.
-		err = filepath.Walk(diffDir, func(
-			path string, info os.FileInfo, err error,
-		) error {
-			if err != nil {
-				return err
+		defer cancel()
+		defer iocancel()
+		waitErr := container.Wait(ctx).Err
+		copyErr := func() error {
+			// TODO if the container is interactive it should be using llb.IgnoreCache anyways
+			// and we shouldn't be exporting any changes to the cache, so return early in that
+			// case. This is a bit ugly though.
+			if isInteractive || waitErr != nil {
+				return nil
 			}
-			if (info.Mode() & os.ModeCharDevice) == os.ModeCharDevice {
-				relPath, err := filepath.Rel(diffDir, path)
+
+			for dest, diffDir := range container.DiffDirs() {
+				if discardChanges[dest] {
+					continue
+				}
+
+				rootDest := filepath.Join(finalUpperDir, dest)
+				// TODO how to ensure the right permissions
+				err = os.MkdirAll(rootDest, 0700)
 				if err != nil {
 					return err
 				}
-				copyPath := filepath.Join(rootDest, relPath)
-				err = os.RemoveAll(copyPath)
+
+				err = fs.CopyDir(rootDest, diffDir)
 				if err != nil {
 					return err
 				}
-				err = os.Link(path, copyPath)
+
+				// TODO there appears to be bug in the CopyDir function where
+				// whiteouts get copied as regular empty files. I was able
+				// to fix that by using the filemode as returned by the actual
+				// stat (instead of go's FileMode), but then discovered there
+				// was yet another issue where char devices can't be made in
+				// unpriv user namespaces...
+				// Hardlink works though! Not really concerned about
+				// crossing filesystems at this point, everything is
+				// expected to use a single underlying fs.
+				// Should fix the issue upstream in continuity either way though
+				// if it turns out to be real.
+				err = filepath.Walk(diffDir, func(
+					path string, info os.FileInfo, err error,
+				) error {
+					if err != nil {
+						return err
+					}
+					if (info.Mode() & os.ModeCharDevice) == os.ModeCharDevice {
+						relPath, err := filepath.Rel(diffDir, path)
+						if err != nil {
+							return err
+						}
+						copyPath := filepath.Join(rootDest, relPath)
+						err = os.RemoveAll(copyPath)
+						if err != nil {
+							return err
+						}
+						err = os.Link(path, copyPath)
+						if err != nil {
+							return err
+						}
+					}
+					return nil
+				})
 				if err != nil {
 					return err
 				}
 			}
 			return nil
-		})
-		if err != nil {
-			return err
-		}
-	}
+		}()
+		destroyErr := container.Destroy(10 * time.Second) // TODO don't hardcode
 
-	return nil
+		err := multierror.Append(waitErr, copyErr, destroyErr).ErrorOrNil()
+		errCh <- err
+	}()
+
+	go func() {
+		defer cancel()
+		var attachErr error
+		if isInteractive {
+			attachErr = ctr.AttachConsole(ioctx, container)
+		} else {
+			attachErr = container.Attach(ioctx, stdin, stdout)
+		}
+		if attachErr == context.Canceled {
+			attachErr = nil
+		}
+		if attachErr != nil {
+			attachErr = fmt.Errorf("error during container io attach: %w", attachErr)
+		}
+		errCh <- attachErr
+	}()
+
+	var finalErr error
+	for i := 0; i < goCount; i++ {
+		finalErr = multierror.Append(finalErr, <-errCh).ErrorOrNil()
+	}
+	return finalErr
 }
 
 func toEnvMap(envList []string) map[string]string {

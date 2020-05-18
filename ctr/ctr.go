@@ -325,13 +325,13 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tty console sock: %w", err)
 	}
-	prekillCleanups = prekillCleanups.Push(ctrConsoleSock.Close)
+	postkillCleanups = postkillCleanups.Push(ctrConsoleSock.Close)
 
 	epoller, err := console.NewEpoller()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create epoller: %w", err)
 	}
-	prekillCleanups = prekillCleanups.Push(epoller.Close)
+	postkillCleanups = postkillCleanups.Push(epoller.Close)
 
 	consoleResizeCh := make(chan console.WinSize)
 	go func() {
@@ -533,7 +533,7 @@ type Attachable interface {
 type Container interface {
 	Attachable
 	Wait(context.Context) WaitResult
-	Destroy(context.Context) error
+	Destroy(time.Duration) error
 	DiffDirs() map[string]string
 }
 
@@ -591,7 +591,7 @@ func (c *container) DiffDirs() map[string]string {
 	return diffDirs
 }
 
-func (c *container) Destroy(ctx context.Context) (rerr error) {
+func (c *container) Destroy(waitTimeout time.Duration) (rerr error) {
 	rerr = multierror.Append(rerr, c.prekillCleanup.Cleanup()).ErrorOrNil()
 
 	for _, sig := range []os.Signal{syscall.SIGTERM, syscall.SIGKILL} {
@@ -603,14 +603,15 @@ func (c *container) Destroy(ctx context.Context) (rerr error) {
 			}
 		}
 
-		timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second) // TODO don't hardcode
+		timeoutCtx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 		defer cancel()
 		waitResult := c.Wait(timeoutCtx)
-		if waitResult.Err == nil {
+		if waitResult.Err != context.DeadlineExceeded {
 			break
 		}
-		fmt.Printf("error waiting for container shutdown after signal %q: %v\n",
-			sig.String(), waitResult.Err)
+		// TODO real logging
+		fmt.Fprintf(os.Stderr, "timeout waiting for container shutdown after signal %q\n",
+			sig.String())
 	}
 
 	err := c.runcCtr.Destroy()
@@ -689,7 +690,7 @@ func AttachConsole(ctx context.Context, attacher Attachable) error {
 		case <-sigchan:
 			newSize, err := stdinConsole.Size()
 			if err != nil {
-				fmt.Printf("failed to get tty size after SIGWINCH: %v\n", err)
+				fmt.Fprintf(os.Stderr, "failed to get tty size after SIGWINCH: %v\n", err)
 			} else {
 				attacher.Resize(newSize)
 			}

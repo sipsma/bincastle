@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/containerd/containerd/namespaces"
 	"github.com/hashicorp/go-multierror"
@@ -79,6 +80,9 @@ func main() {
 					}
 					ctrState := ctr.ContainerStateRoot(ctrStateDir).ContainerState(ctrName)
 
+					sigchan := make(chan os.Signal, 1)
+					signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
 					container, err := ctrState.Start(ctr.ContainerDef{
 						// /self is this process's /proc/self/exe ro-bind mounted
 						// into the container. It's used here instead of
@@ -133,38 +137,49 @@ func main() {
 							ctrName, err)
 					}
 
-					defer func() {
-						err = multierror.Append(err,
-							container.Destroy(context.TODO())).ErrorOrNil()
-					}()
-
 					ctx, cancel := context.WithCancel(context.Background())
+					ioctx, iocancel := context.WithCancel(context.Background())
+					goCount := 3
+					errCh := make(chan error, goCount)
 
-					sigchan := make(chan os.Signal, 1)
-					signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 					go func() {
 						defer cancel()
-						<-sigchan
+						defer iocancel()
+						waitErr := container.Wait(ctx).Err
+						if waitErr == context.Canceled {
+							waitErr = nil
+						}
+						destroyErr := container.Destroy(30*time.Second) // TODO don't hardcode
+						errCh <- multierror.Append(waitErr, destroyErr).ErrorOrNil()
 					}()
 
-					attachDone := make(chan struct{})
 					go func() {
-						defer close(attachDone)
-						attachErr := ctr.AttachConsole(ctx, container)
-						if attachErr != nil && attachErr != context.Canceled {
-							err = multierror.Append(err,
-								fmt.Errorf("error during console attach: %w", attachErr),
-							).ErrorOrNil()
+						defer cancel()
+						attachErr := ctr.AttachConsole(ioctx, container)
+						if attachErr == context.Canceled {
+							attachErr = nil
+						}
+						if attachErr != nil {
+							attachErr = fmt.Errorf("error during console attach: %w", attachErr)
+						}
+						errCh <- attachErr
+					}()
+
+					go func() {
+						defer cancel()
+						select {
+						case sig := <-sigchan:
+							errCh <- fmt.Errorf("received signal %s", sig)
+						case <-ctx.Done():
+							errCh <- nil
 						}
 					}()
-					defer func() {
-						cancel()
-						// make sure attach has returned before returning (so we know the
-						// console tty has been reset).
-						<-attachDone
-					}()
 
-					return multierror.Append(err, container.Wait(ctx).Err)
+					var finalErr error
+					for i := 0; i < goCount; i++ {
+						finalErr = multierror.Append(finalErr, <-errCh).ErrorOrNil()
+					}
+					return finalErr
 				},
 			},
 			{
@@ -174,24 +189,6 @@ func main() {
 					gitUrl := c.Args().Get(0)
 					gitRef := c.Args().Get(1)
 					cmdPath := c.Args().Get(2)
-
-					ctrStateRoot := ctr.ContainerStateRoot("/var/ctrs")
-					ctrState := ctrStateRoot.ContainerState(ctrName)
-					if ctrState.ContainerExists() {
-						return ctr.ContainerExistsError{ctrName}
-					}
-
-					ctx, cancel := context.WithCancel(
-						namespaces.WithNamespace(context.Background(), "buildkit"))
-					defer cancel()
-
-					// TODO just remove imageBackend var entirely?
-					buildkitErrCh, _ := buildkit.Buildkitd(ctx)
-					select {
-					case err := <-buildkitErrCh:
-						return err
-					default:
-					}
 
 					golangBase := graph.Import(llb.Image("docker.io/eriksipsma/golang-singleuser:latest"))
 					// TODO need to clean this interface up a lot... way too verbose
@@ -228,7 +225,51 @@ func main() {
 						return err
 					}
 
-					return buildkit.Build(ctx, "", llbdef, nil, false)
+					sigchan := make(chan os.Signal, 1)
+					signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
+					ctrStateRoot := ctr.ContainerStateRoot("/var/ctrs")
+					ctrState := ctrStateRoot.ContainerState(ctrName)
+					if ctrState.ContainerExists() {
+						return ctr.ContainerExistsError{ctrName}
+					}
+
+					serve, err := buildkit.Buildkitd()
+					if err != nil {
+						return err
+					}
+
+					goCount := 3
+					errCh := make(chan error, goCount)
+
+					ctx, cancel := context.WithCancel(
+						namespaces.WithNamespace(context.Background(), "buildkit"))
+
+					go func() {
+						defer cancel()
+						errCh <- serve(ctx)
+					}()
+
+					go func() {
+						defer cancel()
+						errCh <- buildkit.Build(ctx, "", llbdef, nil, false)
+					}()
+
+					go func() {
+						defer cancel()
+						select {
+						case sig := <-sigchan:
+							errCh <- fmt.Errorf("received signal %s", sig)
+						case <-ctx.Done():
+							errCh <- nil
+						}
+					}()
+
+					var finalErr error
+					for i := 0; i < goCount; i++ {
+						finalErr = multierror.Append(finalErr, <-errCh).ErrorOrNil()
+					}
+					return finalErr
 				},
 			},
 
