@@ -2,29 +2,10 @@ package util
 
 import (
 	"errors"
-	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/moby/buildkit/client/llb"
 )
-
-func Shell(lines ...string) llb.RunOption {
-	lines = append([]string{`set -e`}, lines...)
-	return llb.Args([]string{
-		"sh", "-e", "-c", fmt.Sprintf(
-			// TODO using THEREALEOF allows callers to use <<EOF in their
-			// own shell lines, but is there a better way?
-			"exec sh <<\"THEREALEOF\"\n%s\nTHEREALEOF",
-			strings.Join(lines, "\n"),
-		),
-	})
-}
-
-func ScratchMount(dest string) llb.RunOption {
-	return llb.AddMount(dest, llb.Scratch(), llb.ForceNoOutput)
-}
 
 type LowerDir struct {
 	Index     int

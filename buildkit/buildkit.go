@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -559,6 +560,15 @@ func (e *runcExecutor) Exec(
 	envMap := toEnvMap(meta.Env)
 	rootIsReadOnly := false
 
+	execID := identity.NewID()
+	var isInteractive bool
+	if interactiveID, ok := envMap["BINCASTLE_INTERACTIVE"]; ok {
+		execID = interactiveID
+		isInteractive = true
+	}
+
+	ctrState := ctr.ContainerStateRoot(e.execsDir()).ContainerState(execID)
+
 	rootSnapshotMountable, err := root.Mount(ctx, rootIsReadOnly)
 	if err != nil {
 		return err
@@ -574,88 +584,53 @@ func (e *runcExecutor) Exec(
 	// TODO safe to ignore multiple mounts?
 	finalUpperDir := rootMounts[0].Source
 
-	mountsByDest := make(map[string][]executor.Mount)
-	overlayMounts := make(map[string]bool)
-	discardChanges := make(map[string]bool)
-	for _, execMount := range execMounts {
-		// TODO the implicit mix of an AddMount w/ one of the overlays that this
-		// enables is fragile and surprising, need to do validation
-		ld, err := util.LowerDirFrom(execMount.Dest)
-		if err != nil {
-			mountsByDest[execMount.Dest] = append(mountsByDest[execMount.Dest],
-				execMount)
-			continue
+	sort.Slice(execMounts, func(i, j int) bool {
+		var iIndex, jIndex int
+		if ild, err := util.LowerDirFrom(execMounts[i].Dest); err != nil {
+			iIndex = math.MaxInt64
+		} else {
+			iIndex = ild.Index
 		}
-
-		mountsByDest[ld.Dest] = append(mountsByDest[ld.Dest], execMount)
-		overlayMounts[ld.Dest] = true
-		if !discardChanges[ld.Dest] {
-			discardChanges[ld.Dest] = ld.DiscardChanges
+		if jld, err := util.LowerDirFrom(execMounts[j].Dest); err != nil {
+			jIndex = math.MaxInt64
+		} else {
+			jIndex = jld.Index
 		}
-	}
-
-	for dest, mountList := range mountsByDest {
-		sort.Slice(mountList, func(i, j int) bool {
-			ild, err := util.LowerDirFrom(mountList[i].Dest)
-			if err != nil {
-				return false
-			}
-
-			jld, err := util.LowerDirFrom(mountList[j].Dest)
-			if err != nil {
-				return true
-			}
-
-			return ild.Index < jld.Index
-		})
-		mountsByDest[dest] = mountList
-	}
-
-	execID := identity.NewID()
-	var isInteractive bool
-	if interactiveID, ok := envMap["BINCASTLE_INTERACTIVE"]; ok {
-		execID = interactiveID
-		isInteractive = true
-	}
-
-	ctrState := ctr.ContainerStateRoot(e.execsDir()).ContainerState(execID)
+		return iIndex < jIndex
+	})
 
 	ctrMounts := ctr.Mounts(nil)
-	for dest, mountList := range mountsByDest {
-		for _, execMount := range mountList {
-			snapshotMountable, err := execMount.Src.Mount(ctx, execMount.Readonly)
-			if err != nil {
-				return err
-			}
-			cacheMounts, snapshotCleanup, err := snapshotMountable.Mount()
-			if err != nil {
-				return err
-			}
-			defer func() {
-				rerr = multierror.Append(rerr, snapshotCleanup()).ErrorOrNil()
-			}()
+	for _, execMount := range execMounts {
+		snapshotMountable, err := execMount.Src.Mount(ctx, execMount.Readonly)
+		if err != nil {
+			return err
+		}
+		cacheMounts, snapshotCleanup, err := snapshotMountable.Mount()
+		if err != nil {
+			return err
+		}
+		defer func() {
+			rerr = multierror.Append(rerr, snapshotCleanup()).ErrorOrNil()
+		}()
 
-			for _, cacheMount := range cacheMounts {
-				newMount := ociSpec.Mount{
-					Source: filepath.Join(
-						cacheMount.Source, execMount.Selector),
-					Destination: dest,
+		var isMerged bool
+		ld, err := util.LowerDirFrom(execMount.Dest)
+		if err == nil {
+			isMerged = true
+		}
+		for _, cacheMount := range cacheMounts {
+			if isMerged {
+				ctrMounts = ctrMounts.With(ctr.Layer{
+					Src: filepath.Join(cacheMount.Source, execMount.Selector),
+					Dest: ld.Dest,
+				})
+			} else {
+				ctrMounts = ctrMounts.With(ctr.OCIMount(ociSpec.Mount{
+					Source:      filepath.Join(cacheMount.Source, execMount.Selector),
+					Destination: execMount.Dest,
 					Type:        cacheMount.Type,
 					Options:     cacheMount.Options,
-				}
-				var mntable ctr.Mountable
-				if overlayMounts[dest] {
-					// turn rbinds to binds as rbinds can't be
-					// used for overlay lowerdirs
-					mntable, err = ctr.AsMergedMount(
-						ctr.ReplaceOption(newMount, "rbind", "bind"), "")
-					if err != nil {
-						return err
-					}
-				} else {
-					mntable = ctr.OCIMount(newMount)
-				}
-				ctrMounts = ctrMounts.With(mntable)
+				}))
 			}
 		}
 	}
@@ -717,10 +692,6 @@ func (e *runcExecutor) Exec(
 			}
 
 			for dest, diffDir := range container.DiffDirs() {
-				if discardChanges[dest] {
-					continue
-				}
-
 				rootDest := filepath.Join(finalUpperDir, dest)
 				// TODO how to ensure the right permissions
 				err = os.MkdirAll(rootDest, 0700)

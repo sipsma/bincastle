@@ -28,9 +28,9 @@ func (f cmdOptFunc) applyTo(cmd *exec.Cmd) error {
 	return f(cmd)
 }
 
-func bincastleArgs(gitUrl, gitRef, cmdPath string) cmdOpt {
+func bincastleArgs(args ...string) cmdOpt {
 	return cmdOptFunc(func(cmd *exec.Cmd) error {
-		cmd.Args = append(cmd.Args[:1], "run", gitUrl, gitRef, cmdPath)
+		cmd.Args = append(cmd.Args[:1], args...)
 		return nil
 	})
 }
@@ -147,7 +147,9 @@ func TestDirectoriesRemoved(t *testing.T) {
 	defer cancel()
 
 	// TODO root dir should be configurable
-	homeDir, err := ioutil.TempDir(filepath.Join(os.Getenv("HOME"), ".bincastle/test"), "")
+	testDir := filepath.Join(os.Getenv("HOME"), ".bincastle/test")
+	require.NoError(t, os.MkdirAll(testDir, 0700))
+	homeDir, err := ioutil.TempDir(testDir, "")
 	require.NoError(t, err)
 	defer os.RemoveAll(homeDir)
 
@@ -155,10 +157,10 @@ func TestDirectoriesRemoved(t *testing.T) {
 	require.NoError(t, err)
 	defer pty.Close()
 
-	// TODO don't rely on remote resources during test runtime
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
 	bcCmd, err := newBincastleCmd(ctx,
-		bincastleArgs(
-			"https://github.com/sipsma/bincastle.git", "3da9a59", "internal/integtest/stubsystem"),
+		bincastleArgs("run", filepath.Join(cwd, "../.."), "internal/integtest/stubsystem"),
 		withHomeDir(homeDir),
 		pty,
 		withDebugStderr(os.Stdout),

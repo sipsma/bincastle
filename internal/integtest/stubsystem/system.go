@@ -4,23 +4,18 @@ import (
 	"os"
 
 	"github.com/moby/buildkit/client/llb"
-	"github.com/sipsma/bincastle/graph"
-	"github.com/sipsma/bincastle/util"
+	. "github.com/sipsma/bincastle/graph"
 )
 
 func main() {
-	dt, err := graph.DefaultPkger().Exec(
-		graph.BuildDeps(graph.Import(
-			llb.Image("docker.io/eriksipsma/golang-singleuser:latest"),
-		)),
-		util.Shell(
+	dt, err := Build(Image{Ref: "docker.io/eriksipsma/golang-singleuser:latest"}).Exec(
+		"testctr",
+		Shell(
 			`/bin/echo -n BINCASTLE`,
 			`/bin/echo INITIALIZED`,
 			`/bin/sleep infinity`,
 		),
-		llb.AddEnv("BINCASTLE_INTERACTIVE", "testctr"),
-		llb.IgnoreCache,
-	).State().Marshal(llb.LinuxAmd64)
+	).Marshal(llb.LinuxAmd64)
 	if err != nil {
 		panic(err)
 	}

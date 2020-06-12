@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -190,10 +189,12 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 		return nil, fmt.Errorf(
 			"failed to merge mounts for %s: %w", d.ContainerID(), err)
 	}
-	sortedMounts := sortMounts(mounts)
+
+	// TODO
+	var allLowerDirs []string
 
 	var lowerdirIndex uint
-	for i, m := range sortedMounts {
+	for i, m := range mounts {
 		if m.Type != "overlay" {
 			continue
 		}
@@ -222,8 +223,8 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 			return os.RemoveAll(overlayDir.PrivateDir())
 		})
 
-		if i < len(sortedMounts)-1 {
-			for _, laterMount := range sortedMounts[i+1:] {
+		if i < len(mounts)-1 {
+			for _, laterMount := range mounts[i+1:] {
 				if !isUnderDir(laterMount.Destination, m.Destination) {
 					continue
 				}
@@ -277,6 +278,7 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 			newLowerdir := d.lowerDirSymlink(lowerdirIndex)
 			lowerdirIndex += 1
 			newLowerdirs = append(newLowerdirs, filepath.Base(newLowerdir))
+			allLowerDirs = append(allLowerDirs, newLowerdir)
 
 			err = os.Symlink(lowerdir, newLowerdir)
 			if err != nil && !os.IsNotExist(err) {
@@ -285,7 +287,7 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 			}
 		}
 
-		mounts[m.Destination] = oci.Mount{
+		mounts[i] = oci.Mount{
 			Source:      m.Source,
 			Destination: m.Destination,
 			Type:        m.Type,
@@ -297,7 +299,22 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 			}.OptionsSlice(),
 		}
 	}
-	sortedMounts = sortMounts(mounts)
+
+	// TODO
+	for i, ld := range allLowerDirs {
+		src, err := filepath.EvalSymlinks(ld)
+		if err != nil {
+			// TODO
+			fmt.Printf("eval symlink err %v\n", err)
+			continue
+		}
+		mounts = append(mounts, oci.Mount{
+			Source:      src,
+			Destination: filepath.Join("/debug", strconv.Itoa(i)),
+			Type:        "none",
+			Options:     []string{"bind"},
+		})
+	}
 
 	inFifoCh := make(chan io.ReadWriteCloser)
 	go func() {
@@ -434,7 +451,7 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 				Readonly: false,
 			},
 			Hostname: def.Hostname,
-			Mounts:   sortedMounts,
+			Mounts:   mounts,
 			Linux: &oci.Linux{
 				UIDMappings: []oci.LinuxIDMapping{
 					{
@@ -569,7 +586,7 @@ type container struct {
 	state           ContainerState
 	initProc        libcontainer.Process
 	runcCtr         libcontainer.Container
-	mounts          map[string]oci.Mount
+	mounts          []oci.Mount
 	consoleResizeCh chan<- console.WinSize
 
 	prekillCleanup  CleanupStack
@@ -582,11 +599,11 @@ type container struct {
 
 func (c *container) DiffDirs() map[string]string {
 	diffDirs := make(map[string]string)
-	for dest, m := range c.mounts {
+	for _, m := range c.mounts {
 		if m.Type != "overlay" {
 			continue
 		}
-		diffDirs[dest] = parseOverlay(m.Options).UpperDir
+		diffDirs[m.Destination] = parseOverlay(m.Options).UpperDir
 	}
 	return diffDirs
 }
@@ -721,27 +738,6 @@ func (c *container) Wait(ctx context.Context) WaitResult {
 	}
 }
 
-type Mounts []Mountable
-
-func (mounts Mounts) With(more ...Mountable) Mounts {
-	return append(mounts, more...)
-}
-
-func (mounts Mounts) OCIMounts(state ContainerState) (map[string]oci.Mount, error) {
-	ociMounts := make(map[string]oci.Mount)
-	for _, m := range mounts {
-		err := m.AddMount(state, ociMounts)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return ociMounts, nil
-}
-
-type Mountable interface {
-	AddMount(state ContainerState, mounts map[string]oci.Mount) error
-}
-
 type GenericMountOptions struct {
 	Noexec      bool
 	Nosuid      bool
@@ -783,89 +779,6 @@ func ParseGenericMountOpts(options []string) GenericMountOptions {
 	return genericMountOptions
 }
 
-type MergedMount struct {
-	Dest     string
-	Sources  []string
-	UpperDir string
-	GenericMountOptions
-}
-
-func (m MergedMount) AddMount(
-	state ContainerState, mounts map[string]oci.Mount,
-) error {
-	if len(m.Sources) == 0 {
-		return nil
-	}
-
-	// TODO validation, like being an abs path
-
-	newMount := MergedMount{
-		Dest: m.Dest,
-	}
-	existingMount, alreadyExists := mounts[m.Dest]
-	if alreadyExists {
-		if existingMount.Type == "overlay" {
-			newMount.Sources = parseOverlay(existingMount.Options).LowerDirs
-		} else {
-			return fmt.Errorf("cannot merge mount into %+v", existingMount)
-		}
-		// TODO should GenericMountOptions be merged? or just overwrite like they
-		// do now?
-	}
-
-	newMount.Sources = append(newMount.Sources, m.Sources...)
-
-	overlayDir := state.OverlayDir(m.Dest)
-	if m.UpperDir == "" {
-		m.UpperDir = overlayDir.UpperDir()
-	}
-
-	upperDir := parseOverlay(existingMount.Options).UpperDir
-	if upperDir == "" {
-		upperDir = m.UpperDir
-	} else if m.UpperDir != upperDir {
-		return fmt.Errorf("cannot overwrite existing upperdir %q with %q",
-			upperDir, m.UpperDir,
-		)
-	}
-
-	overlay := overlayOptions{
-		LowerDirs: newMount.Sources,
-		UpperDir:  upperDir,
-		WorkDir:   overlayDir.WorkDir(),
-	}
-	mounts[m.Dest] = oci.Mount{
-		Source:      "none",
-		Destination: m.Dest,
-		Type:        "overlay",
-		Options:     append(overlay.OptionsSlice(), m.GenericMountOptions.Opts()...),
-	}
-	return nil
-}
-
-func AsMergedMount(m oci.Mount, upperDir string) (MergedMount, error) {
-	if m.Type == "overlay" {
-		return MergedMount{
-			Dest:                m.Destination,
-			Sources:             parseOverlay(m.Options).LowerDirs,
-			UpperDir:            upperDir,
-			GenericMountOptions: ParseGenericMountOpts(m.Options),
-		}, nil
-	}
-	if HasBind(m.Options) {
-		return MergedMount{
-			Dest:                m.Destination,
-			Sources:             []string{m.Source},
-			UpperDir:            upperDir,
-			GenericMountOptions: ParseGenericMountOpts(m.Options),
-		}, nil
-	}
-
-	// this includes rbind (which doesn't work because lowerdirs don't recurse)
-	return MergedMount{}, fmt.Errorf(
-		"cannot convert mount that isn't overlay or bind to MergedMount: %+v", m)
-}
-
 type BindMount struct {
 	Source    string
 	Dest      string
@@ -874,9 +787,7 @@ type BindMount struct {
 	GenericMountOptions
 }
 
-func (m BindMount) AddMount(
-	state ContainerState, mounts map[string]oci.Mount,
-) error {
+func (m BindMount) AddToMountTree(t *MountTree) error {
 	opts := m.GenericMountOptions.Opts()
 	if m.Recursive {
 		opts = append(opts, "rbind")
@@ -891,7 +802,7 @@ func (m BindMount) AddMount(
 		Destination: m.Dest,
 		Type:        "none",
 		Options:     opts,
-	}).AddMount(state, mounts)
+	}).AddToMountTree(t)
 }
 
 type TmpfsMount struct {
@@ -901,9 +812,7 @@ type TmpfsMount struct {
 	GenericMountOptions
 }
 
-func (m TmpfsMount) AddMount(
-	state ContainerState, mounts map[string]oci.Mount,
-) error {
+func (m TmpfsMount) AddToMountTree(t *MountTree) error {
 	options := []string{
 		fmt.Sprintf("mode=%04o", m.Mode),
 	}
@@ -918,14 +827,12 @@ func (m TmpfsMount) AddMount(
 		Destination: m.Dest,
 		Type:        "tmpfs",
 		Options:     append(options, m.GenericMountOptions.Opts()...),
-	}).AddMount(state, mounts)
+	}).AddToMountTree(t)
 }
 
 type ProcfsMount struct{}
 
-func (m ProcfsMount) AddMount(
-	state ContainerState, mounts map[string]oci.Mount,
-) error {
+func (m ProcfsMount) AddToMountTree(t *MountTree) error {
 	return OCIMount(oci.Mount{
 		Source:      "proc",
 		Destination: "/proc",
@@ -935,7 +842,7 @@ func (m ProcfsMount) AddMount(
 			Nosuid: true,
 			Nodev:  true,
 		}.Opts(),
-	}).AddMount(state, mounts)
+	}).AddToMountTree(t)
 }
 
 type DevptsMount struct {
@@ -946,9 +853,7 @@ type DevptsMount struct {
 	Gid      uint32
 }
 
-func (m DevptsMount) AddMount(
-	state ContainerState, mounts map[string]oci.Mount,
-) error {
+func (m DevptsMount) AddToMountTree(t *MountTree) error {
 	return OCIMount(oci.Mount{
 		Source:      "devpts",
 		Destination: "/dev/pts",
@@ -963,14 +868,12 @@ func (m DevptsMount) AddMount(
 			fmt.Sprintf("uid=%d", m.Uid),
 			fmt.Sprintf("gid=%d", m.Gid),
 		),
-	}).AddMount(state, mounts)
+	}).AddToMountTree(t)
 }
 
 type MqueueMount struct{}
 
-func (m MqueueMount) AddMount(
-	state ContainerState, mounts map[string]oci.Mount,
-) error {
+func (m MqueueMount) AddToMountTree(t *MountTree) error {
 	return OCIMount(oci.Mount{
 		Source:      "mqueue",
 		Destination: "/dev/mqueue",
@@ -980,30 +883,11 @@ func (m MqueueMount) AddMount(
 			Nosuid: true,
 			Nodev:  true,
 		}.Opts(),
-	}).AddMount(state, mounts)
-}
-
-type OCIMount oci.Mount
-
-func (m OCIMount) AddMount(
-	state ContainerState, mounts map[string]oci.Mount,
-) error {
-	ociMount := oci.Mount(m)
-	existingMount, alreadyExists := mounts[m.Destination]
-	if alreadyExists {
-		return fmt.Errorf("cannot merge oci mount into %+v", existingMount)
-	}
-	mounts[m.Destination] = oci.Mount{
-		Source:      ociMount.Source,
-		Destination: ociMount.Destination,
-		Type:        ociMount.Type,
-		Options:     ociMount.Options,
-	}
-	return nil
+	}).AddToMountTree(t)
 }
 
 func DefaultMounts() Mounts {
-	return Mounts([]Mountable{
+	return Mounts([]MountTreeOpt{
 		ProcfsMount{},
 		TmpfsMount{
 			Dest: "/dev",
@@ -1042,7 +926,7 @@ func DefaultMounts() Mounts {
 		TmpfsMount{
 			Dest:     "/tmp",
 			Mode:     os.FileMode(01777),
-			ByteSize: uint(262144 * 1024),
+			ByteSize: uint(1024 * 1024 * 1024),
 			GenericMountOptions: GenericMountOptions{
 				Noexec: true,
 				Nosuid: true,
@@ -1166,26 +1050,4 @@ func parseOverlay(options []string) overlayOptions {
 	}
 
 	return overlay
-}
-
-func sortMounts(mounts map[string]oci.Mount) []oci.Mount {
-	// ensure subdirs appear after parent dirs (thankfully lexicographic sort works)
-	var sorted []oci.Mount
-	for _, m := range mounts {
-		sorted = append(sorted, m)
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return filepath.Clean(sorted[i].Destination) <
-			filepath.Clean(sorted[j].Destination)
-	})
-	return sorted
-}
-
-func isUnderDir(path string, baseDir string) bool {
-	path = filepath.Clean(path)
-	baseDir = filepath.Clean(baseDir)
-	if baseDir == "/" && path != "/" {
-		return true
-	}
-	return strings.HasPrefix(path, baseDir+"/")
 }

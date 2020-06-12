@@ -13,13 +13,11 @@ import (
 	"github.com/containerd/containerd/namespaces"
 	"github.com/hashicorp/go-multierror"
 	"github.com/moby/buildkit/client/llb"
-	"github.com/moby/buildkit/client/llb/llbbuild"
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/sipsma/bincastle/buildkit"
 	"github.com/sipsma/bincastle/ctr"
 	"github.com/sipsma/bincastle/distro/src"
-	"github.com/sipsma/bincastle/graph"
-	"github.com/sipsma/bincastle/util"
+	. "github.com/sipsma/bincastle/graph"
 	"github.com/urfave/cli"
 	"golang.org/x/sys/unix"
 
@@ -80,6 +78,42 @@ func main() {
 					}
 					ctrState := ctr.ContainerStateRoot(ctrStateDir).ContainerState(ctrName)
 
+					mounts := ctr.DefaultMounts().With(
+						ctr.BindMount{
+							Dest:     "/etc/resolv.conf",
+							Source:   "/etc/resolv.conf",
+							Readonly: true,
+						},
+						ctr.BindMount{
+							Dest:     "/etc/hosts",
+							Source:   "/etc/hosts",
+							Readonly: true,
+						},
+						ctr.BindMount{
+							Dest:   "/run/ssh-agent.sock",
+							Source: sshAgentSock,
+						},
+						ctr.BindMount{
+							Dest:   "/var",
+							Source: varDir,
+						},
+						ctr.BindMount{
+							Dest:     "/self",
+							Source:   selfBin,
+							Readonly: true,
+						},
+					)
+
+					// TODO this is complete nonsense due to my laziness
+					if c.Args().Get(2) == "" {
+						localDir := c.Args().Get(0)
+						mounts = mounts.With(ctr.BindMount{
+							Source: localDir,
+							Dest: "/src",
+							Readonly: true,
+						})
+					}
+
 					sigchan := make(chan os.Signal, 1)
 					signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
@@ -105,31 +139,7 @@ func main() {
 							Capabilities: &ctr.AllCaps,
 						},
 						Hostname: "bincastle",
-						Mounts: ctr.DefaultMounts().With(
-							ctr.BindMount{
-								Dest:     "/etc/resolv.conf",
-								Source:   "/etc/resolv.conf",
-								Readonly: true,
-							},
-							ctr.BindMount{
-								Dest:     "/etc/hosts",
-								Source:   "/etc/hosts",
-								Readonly: true,
-							},
-							ctr.BindMount{
-								Dest:   "/run/ssh-agent.sock",
-								Source: sshAgentSock,
-							},
-							ctr.BindMount{
-								Dest:   "/var",
-								Source: varDir,
-							},
-							ctr.BindMount{
-								Dest:     "/self",
-								Source:   selfBin,
-								Readonly: true,
-							},
-						),
+						Mounts: mounts,
 					}, true)
 					if err != nil {
 						return fmt.Errorf(
@@ -149,7 +159,7 @@ func main() {
 						if waitErr == context.Canceled {
 							waitErr = nil
 						}
-						destroyErr := container.Destroy(30*time.Second) // TODO don't hardcode
+						destroyErr := container.Destroy(30 * time.Second) // TODO don't hardcode
 						errCh <- multierror.Append(waitErr, destroyErr).ErrorOrNil()
 					}()
 
@@ -190,37 +200,39 @@ func main() {
 					gitRef := c.Args().Get(1)
 					cmdPath := c.Args().Get(2)
 
-					golangBase := graph.Import(llb.Image("docker.io/eriksipsma/golang-singleuser:latest"))
-					// TODO need to clean this interface up a lot... way too verbose
-					llbSrc := src.Git(graph.DefaultPkger(
-						llb.AddEnv("PATH", "/bin:/sbin:/usr/bin"),
-						graph.BuildDeps(
-							graph.DefaultPkger().Exec(
-								llb.AddEnv("PATH", "/bin:/sbin:/usr/bin"),
-								graph.BuildDeps(golangBase),
-								util.Shell(`/sbin/apk add git`),
-							).With(graph.RuntimeDeps(golangBase)),
-						),
-					), "llb-source", gitUrl, src.GitOpt{Ref: src.Ref(gitRef)})
+					localDirs := make(map[string]string)
+					var llbsrc AsSpec
+					// TODO support for local dir is mostly complete nonsense right now due to my laziness
+					if cmdPath == "" {
+						localPath := c.Args().Get(0)
+						localDirs[localPath] = "/src"
+						cmdPath = c.Args().Get(1)
+						llbsrc = Local{Path: localPath}
+					} else {
+						llbsrc = src.ViaGit{
+							URL:       gitUrl,
+							Ref:       gitRef,
+							Name:      "llb",
+							AlwaysRun: true,
+						}
+					}
 
-					llbdef, err := graph.DefaultPkger().Exec(
-						graph.BuildDeps(
-							golangBase,
-							llbSrc.With(graph.MountDir("/src")),
+					llbdef, err := Build(LayerSpec(
+						Dep(LayerSpec(
+							Dep(Image{Ref: "docker.io/eriksipsma/golang-singleuser:latest"}),
+							Shell(`/sbin/apk add build-base`),
+						)),
+						BuildDep(Wrap(llbsrc, MountDir("/llbsrc"))),
+						Env("PATH", "/bin:/sbin:/usr/bin:/usr/local/go/bin:/go/bin"),
+						Env("GO111MODULE", "on"),
+						ScratchMount(`/build`),
+						Env("GOPATH", "/build"),
+						Shell(
+							`cd /llbsrc`,
+							fmt.Sprintf(`go build -o /llbgen %s`, filepath.Join("/llbsrc", cmdPath)),
 						),
-						llb.AddEnv("GOPATH", "/go"),
-						llb.AddEnv("PATH", "/bin:/sbin:/usr/bin:/usr/local/go/bin:/go/bin"),
-						llb.AddEnv("GO111MODULE", "on"),
-						util.ScratchMount("/build"),
-						llb.Dir("/src"),
-						util.Shell(
-							`apk add build-base`,
-							fmt.Sprintf(`go build -o /build/llb %s`, filepath.Join("/src", cmdPath)),
-							`/build/llb > /llboutput`,
-						),
-					).State().With(
-						llbbuild.Build(llbbuild.WithFilename("/llboutput")),
-					).Marshal(llb.LinuxAmd64)
+						AlwaysRun(true),
+					)).AsBuildSource("/llbgen").Marshal(llb.LinuxAmd64)
 					if err != nil {
 						return err
 					}
@@ -252,7 +264,7 @@ func main() {
 
 					go func() {
 						defer cancel()
-						errCh <- buildkit.Build(ctx, "", llbdef, nil, false)
+						errCh <- buildkit.Build(ctx, "", llbdef, localDirs, false)
 					}()
 
 					go func() {
