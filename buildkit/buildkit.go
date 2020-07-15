@@ -20,6 +20,7 @@ import (
 	"github.com/containerd/containerd/diff/walking"
 	"github.com/containerd/containerd/gc"
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/metadata"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/snapshots"
@@ -79,7 +80,7 @@ var (
 
 	allowCfg = []string{"security.insecure", "network.host"}
 
-	gcKeepStorage int64 = 50e9 // ~50GB
+	gcKeepStorage int64 = 20e9 // ~20GB
 
 	sshCfg = sshprovider.AgentConfig{
 		ID:    "git",
@@ -418,9 +419,12 @@ func runcWorker(
 		IdentityMapping: nil,
 		LeaseManager:    leaseManager,
 		RegistryHosts:   resolverFn,
-		GarbageCollect: func(context.Context) (gc.Stats, error) {
-			// TODO this just disable gc right?
-			return nil, nil
+		GarbageCollect: func(ctx context.Context) (gc.Stats, error) {
+			l, err := leaseManager.Create(ctx)
+			if err != nil {
+				return nil, nil
+			}
+			return nil, leaseManager.Delete(ctx, leases.Lease{ID: l.ID}, leases.SynchronousDelete)
 		},
 	}
 
