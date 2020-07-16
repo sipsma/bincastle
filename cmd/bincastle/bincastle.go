@@ -35,6 +35,17 @@ const (
 var (
 	homeDir      = os.Getenv("HOME")
 	sshAgentSock = os.Getenv("SSH_AUTH_SOCK")
+
+	exportImportFlags = []cli.Flag{
+		&cli.StringFlag{
+			Name: "export",
+			Usage: "registry ref to export cached results to",
+		},
+		&cli.StringFlag{
+			Name: "import",
+			Usage: "registry ref to import cached results from",
+		},
+	}
 )
 
 func init() {
@@ -58,6 +69,7 @@ func main() {
 			{
 				Name:  runArg,
 				Usage: "start the system in a rootless container",
+				Flags: exportImportFlags,
 				Action: func(c *cli.Context) (err error) {
 					varDir := filepath.Join(homeDir, ".bincastle", "var")
 					err = os.MkdirAll(varDir, 0700)
@@ -108,8 +120,8 @@ func main() {
 					if c.Args().Get(2) == "" {
 						localDir := c.Args().Get(0)
 						mounts = mounts.With(ctr.BindMount{
-							Source: localDir,
-							Dest: "/src",
+							Source:   localDir,
+							Dest:     "/src",
 							Readonly: true,
 						})
 					}
@@ -129,7 +141,7 @@ func main() {
 						// /self and use that to self-exec rather than
 						// /proc/self/exe
 						ContainerProc: ctr.ContainerProc{
-							Args: append([]string{"/self", internalRunArg}, c.Args()...),
+							Args: append([]string{"/self", internalRunArg}, os.Args[2:]...),
 							Env: []string{
 								"SSH_AUTH_SOCK=/run/ssh-agent.sock",
 							},
@@ -139,7 +151,7 @@ func main() {
 							Capabilities: &ctr.AllCaps,
 						},
 						Hostname: "bincastle",
-						Mounts: mounts,
+						Mounts:   mounts,
 					}, true)
 					if err != nil {
 						return fmt.Errorf(
@@ -195,6 +207,7 @@ func main() {
 			{
 				Name:   internalRunArg,
 				Hidden: true,
+				Flags: exportImportFlags,
 				Action: func(c *cli.Context) (err error) {
 					gitUrl := c.Args().Get(0)
 					gitRef := c.Args().Get(1)
@@ -232,7 +245,7 @@ func main() {
 							fmt.Sprintf(`go build -o /llbgen %s`, filepath.Join("/llbsrc", cmdPath)),
 						),
 						AlwaysRun(true),
-					)).AsBuildSource("/llbgen").Marshal(llb.LinuxAmd64)
+					)).AsBuildSource("/llbgen").Marshal(context.TODO(), llb.LinuxAmd64)
 					if err != nil {
 						return err
 					}
@@ -264,7 +277,12 @@ func main() {
 
 					go func() {
 						defer cancel()
-						errCh <- buildkit.Build(ctx, "", llbdef, localDirs, false)
+						errCh <- buildkit.Build(ctx,
+							llbdef,
+							localDirs,
+							c.String("export"),
+							c.String("import"),
+						)
 					}()
 
 					go func() {

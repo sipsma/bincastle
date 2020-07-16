@@ -13,18 +13,17 @@ replace github.com/opencontainers/runc => github.com/opencontainers/runc v1.0.0-
 
 replace github.com/opencontainers/runtime-spec => github.com/opencontainers/runtime-spec v0.1.2-0.20190207185410-29686dbc5559
 
-replace github.com/containerd/containerd => github.com/containerd/containerd v1.3.1-0.20200227195959-4d242818bf55
+replace github.com/containerd/containerd => github.com/containerd/containerd v1.3.1-0.20200512144102-f13ba8f2f2fd
 
 replace github.com/docker/docker => github.com/docker/docker v1.4.2-0.20200227233006-38f52c9fec82
 
 require (
 	github.com/checkpoint-restore/go-criu v0.0.0-20191125063657-fcdcd07065c5 // indirect
 	github.com/cilium/ebpf v0.0.0-20200319110858-a7172c01168f // indirect
-	github.com/containerd/cgroups v0.0.0-20200308110149-6c3dec43a103 // indirect
-	github.com/containerd/console v0.0.0-20191219165238-8375c3424e4d
+	github.com/containerd/console v1.0.0
 	github.com/containerd/containerd v1.4.0-0
-	github.com/containerd/continuity v0.0.0-20200228182428-0f16d7a0959c
-	github.com/containerd/fifo v0.0.0-20191213151349-ff969a566b00
+	github.com/containerd/continuity v0.0.0-20200413184840-d3ef23f19fbb
+	github.com/containerd/fifo v0.0.0-20200410184934-f15a3290365b
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf // indirect
 	github.com/creack/pty v1.1.10
 	github.com/cyphar/filepath-securejoin v0.2.2 // indirect
@@ -38,22 +37,18 @@ require (
 	github.com/hashicorp/go-immutable-radix v1.2.0 // indirect
 	github.com/hashicorp/go-multierror v1.0.0
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
-	github.com/mitchellh/hashstructure v1.0.0
-	github.com/moby/buildkit v0.7.0-rc1
+	github.com/moby/buildkit v0.7.1-0.20200717034530-97ca82f4c422
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/mrunalp/fileutils v0.0.0-20171103030105-7d4729fb3618 // indirect
-	github.com/opencontainers/go-digest v1.0.0-rc1
+	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.0.1
 	github.com/opencontainers/runc v1.0.0-rc9.0.20200221051241-688cf6d43cc4
-	github.com/opencontainers/runtime-spec v1.0.1
-	github.com/opencontainers/selinux v1.4.0 // indirect
+	github.com/opencontainers/runtime-spec v1.0.2
 	github.com/opentracing-contrib/go-stdlib v0.0.0-20190519235532-cf7a6c988dc9 // indirect
-	github.com/opentracing/opentracing-go v1.1.0 // indirect
 	github.com/pkg/errors v0.9.1
 	github.com/seccomp/libseccomp-golang v0.9.1 // indirect
-	github.com/stretchr/testify v1.4.0
+	github.com/stretchr/testify v1.5.1
 	github.com/urfave/cli v1.22.3
-	github.com/vishvananda/netlink v1.1.0 // indirect
 	go.etcd.io/bbolt v1.3.4
 	go.opencensus.io v0.22.3 // indirect
 	golang.org/x/crypto v0.0.0-20200320181102-891825fb96df // indirect

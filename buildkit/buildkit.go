@@ -3,13 +3,11 @@ package buildkit
 import (
 	"context"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"math"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -88,8 +86,8 @@ var (
 	}
 
 	insecure   = true
-	resolverFn = resolver.NewRegistryConfig(map[string]resolver.RegistryConf{
-		"docker.io": resolver.RegistryConf{
+	resolverFn = resolver.NewRegistryConfig(map[string]config.RegistryConfig{
+		"docker.io": config.RegistryConfig{
 			Insecure: &insecure, // TODO getting unknown CA errors without this, need better fix
 		},
 	})
@@ -97,10 +95,10 @@ var (
 
 func Build(
 	ctx context.Context,
-	imageName string,
 	llbdef *llb.Definition,
 	localDirs map[string]string,
-	unpack bool,
+	exportRef string,
+	importRef string,
 ) error {
 	// TODO timeout?
 	// TODO avoid connecting over socket, just use solver directly?
@@ -126,39 +124,28 @@ func Build(
 		entitlementCfg = append(entitlementCfg, entitlement)
 	}
 
-	var exportCfgs []client.ExportEntry
 	var cacheExport []client.CacheOptionsEntry
-	var cacheImport []client.CacheOptionsEntry
-	if imageName != "" {
-		exportCfgs = append(exportCfgs, client.ExportEntry{
-			Type: "image",
+	if exportRef != "" {
+		cacheExport = []client.CacheOptionsEntry{{
+			Type: "registry",
 			Attrs: map[string]string{
-				"unpack": strconv.FormatBool(unpack),
-				"name":   imageName,
+				"ref":  exportRef,
+				"mode": "max", // TODO should this be configurable?
 			},
-		})
+		}}
 	}
 
-	/* TODO investigate why using buildkit caches causes the CPU to
-	       get pegged at 100% and do nothing seemingly indefinitely
-			cacheExport = []client.CacheOptionsEntry{{
-				Type: "registry",
-				Attrs: map[string]string{
-					"ref": "localhost:5000/buildcache",
-					"mode": "max",
-				},
-			}}
-
-			cacheImport = []client.CacheOptionsEntry{{
-				Type: "registry",
-				Attrs: map[string]string{
-					"ref": "localhost:5000/buildcache",
-				},
-			}}
-	*/
+	var cacheImport []client.CacheOptionsEntry
+	if importRef != "" {
+		cacheImport = []client.CacheOptionsEntry{{
+			Type: "registry",
+			Attrs: map[string]string{
+				"ref": importRef,
+			},
+		}}
+	}
 
 	solveOpt := client.SolveOpt{
-		Exports:             exportCfgs,
 		Frontend:            "",
 		FrontendAttrs:       nil,
 		CacheExports:        cacheExport,
@@ -536,14 +523,22 @@ func (e *runcExecutor) Shutdown() {
 	return
 }
 
-func (e *runcExecutor) Exec(
+func (e *runcExecutor) Exec(context.Context, string, executor.ProcessInfo) error {
+	panic("exec is not implemented yet")
+}
+
+func (e *runcExecutor) Run(
 	ctx context.Context,
-	meta executor.Meta,
+	id string,
 	root cache.Mountable,
 	execMounts []executor.Mount,
-	stdin io.ReadCloser,
-	stdout, stderr io.WriteCloser,
+	process executor.ProcessInfo,
+	_ chan<- struct{}, // started is ignored for now
 ) (rerr error) {
+	meta := process.Meta
+	stdin := process.Stdin
+	stdout := process.Stdout
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -564,14 +559,15 @@ func (e *runcExecutor) Exec(
 	envMap := toEnvMap(meta.Env)
 	rootIsReadOnly := false
 
-	execID := identity.NewID()
 	var isInteractive bool
 	if interactiveID, ok := envMap["BINCASTLE_INTERACTIVE"]; ok {
-		execID = interactiveID
 		isInteractive = true
+		id = interactiveID
+	} else if id == "" {
+		id = identity.NewID()
 	}
 
-	ctrState := ctr.ContainerStateRoot(e.execsDir()).ContainerState(execID)
+	ctrState := ctr.ContainerStateRoot(e.execsDir()).ContainerState(id)
 
 	rootSnapshotMountable, err := root.Mount(ctx, rootIsReadOnly)
 	if err != nil {
@@ -625,7 +621,7 @@ func (e *runcExecutor) Exec(
 		for _, cacheMount := range cacheMounts {
 			if isMerged {
 				ctrMounts = ctrMounts.With(ctr.Layer{
-					Src: filepath.Join(cacheMount.Source, execMount.Selector),
+					Src:  filepath.Join(cacheMount.Source, execMount.Selector),
 					Dest: ld.Dest,
 				})
 			} else {

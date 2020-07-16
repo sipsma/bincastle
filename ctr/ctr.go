@@ -312,7 +312,7 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 			Source:      src,
 			Destination: filepath.Join("/debug", strconv.Itoa(i)),
 			Type:        "none",
-			Options:     []string{"bind"},
+			Options:     []string{"bind", "ro"},
 		})
 	}
 

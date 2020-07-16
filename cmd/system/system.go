@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"io"
@@ -173,7 +174,7 @@ func main() {
 		Args("/bin/bash", "-l"),
 	)
 
-	dt, err := st.Marshal(llb.LinuxAmd64)
+	dt, err := st.Marshal(context.Background(), llb.LinuxAmd64)
 	if err != nil {
 		panic(err)
 	}

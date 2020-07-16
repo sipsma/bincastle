@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -348,7 +349,7 @@ func (g *Graph) DumpDot(w io.Writer) error {
 	})
 	fmt.Fprintln(w, "digraph {")
 	for _, l := range layers {
-		def, err := l.state.Marshal(llb.LinuxAmd64)
+		def, err := l.state.Marshal(context.TODO(), llb.LinuxAmd64)
 		if err != nil {
 			return err
 		}
@@ -398,7 +399,7 @@ func (g *Graph) calcDigest() digest.Digest {
 			panic(err)
 		}
 
-		def, err := l.state.Marshal()
+		def, err := l.state.Marshal(context.TODO())
 		if err != nil {
 			panic(err)
 		}
