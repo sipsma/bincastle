@@ -18,43 +18,24 @@ replace github.com/containerd/containerd => github.com/containerd/containerd v1.
 replace github.com/docker/docker => github.com/docker/docker v1.4.2-0.20200227233006-38f52c9fec82
 
 require (
-	github.com/checkpoint-restore/go-criu v0.0.0-20191125063657-fcdcd07065c5 // indirect
-	github.com/cilium/ebpf v0.0.0-20200319110858-a7172c01168f // indirect
 	github.com/containerd/console v1.0.0
 	github.com/containerd/containerd v1.4.0-0
 	github.com/containerd/continuity v0.0.0-20200413184840-d3ef23f19fbb
 	github.com/containerd/fifo v0.0.0-20200410184934-f15a3290365b
-	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf // indirect
 	github.com/creack/pty v1.1.10
-	github.com/cyphar/filepath-securejoin v0.2.2 // indirect
-	github.com/docker/cli v0.0.0-20200320120634-22acbbcc4b3f // indirect
-	github.com/docker/docker v1.13.1 // indirect
-	github.com/docker/docker-credential-helpers v0.6.3 // indirect
 	github.com/gofrs/flock v0.7.1
-	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect
-	github.com/golang/protobuf v1.3.5 // indirect
-	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
-	github.com/hashicorp/go-immutable-radix v1.2.0 // indirect
 	github.com/hashicorp/go-multierror v1.0.0
-	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/moby/buildkit v0.7.1-0.20200717034530-97ca82f4c422
-	github.com/morikuni/aec v1.0.0 // indirect
-	github.com/mrunalp/fileutils v0.0.0-20171103030105-7d4729fb3618 // indirect
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.0.1
 	github.com/opencontainers/runc v1.0.0-rc9.0.20200221051241-688cf6d43cc4
 	github.com/opencontainers/runtime-spec v1.0.2
-	github.com/opentracing-contrib/go-stdlib v0.0.0-20190519235532-cf7a6c988dc9 // indirect
 	github.com/pkg/errors v0.9.1
-	github.com/seccomp/libseccomp-golang v0.9.1 // indirect
+	github.com/sipsma/bincastle-distro v0.0.0-20200717202320-bf25c64f217b
 	github.com/stretchr/testify v1.5.1
 	github.com/urfave/cli v1.22.3
 	go.etcd.io/bbolt v1.3.4
-	go.opencensus.io v0.22.3 // indirect
-	golang.org/x/crypto v0.0.0-20200320181102-891825fb96df // indirect
-	golang.org/x/net v0.0.0-20200320220750-118fecf932d8 // indirect
 	golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a
 	golang.org/x/sys v0.0.0-20200321134203-328b4cd54aae
-	google.golang.org/genproto v0.0.0-20200319113533-08878b785e9c // indirect
 	google.golang.org/grpc v1.28.0
 )

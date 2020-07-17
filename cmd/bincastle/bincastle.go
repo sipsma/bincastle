@@ -17,7 +17,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/sipsma/bincastle/buildkit"
 	"github.com/sipsma/bincastle/ctr"
-	"github.com/sipsma/bincastle/distro/src"
+	"github.com/sipsma/bincastle-distro/src"
 	. "github.com/sipsma/bincastle/graph"
 	"github.com/urfave/cli"
 	"golang.org/x/sys/unix"
