@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -116,8 +117,8 @@ func main() {
 						},
 					)
 
-					// TODO this is complete nonsense due to my laziness
-					if c.Args().Get(2) == "" {
+					// TODO this is just a lazy hack right now
+					if !strings.HasPrefix(c.Args().Get(0), "https://") && !strings.HasPrefix(c.Args().Get(0), "ssh://") {
 						localDir := c.Args().Get(0)
 						mounts = mounts.With(ctr.BindMount{
 							Source:   localDir,
@@ -209,31 +210,29 @@ func main() {
 				Hidden: true,
 				Flags: exportImportFlags,
 				Action: func(c *cli.Context) (err error) {
-					gitUrl := c.Args().Get(0)
-					gitRef := c.Args().Get(1)
-					cmdPath := c.Args().Get(2)
-
 					localDirs := make(map[string]string)
 					var llbsrc AsSpec
-					// TODO support for local dir is mostly complete nonsense right now due to my laziness
-					if cmdPath == "" {
+					var cmdPath string
+					// TODO support for local dir is complete nonsense right now
+					if !strings.HasPrefix(c.Args().Get(0), "https://") && !strings.HasPrefix(c.Args().Get(0), "ssh://") {
 						localPath := c.Args().Get(0)
 						localDirs[localPath] = "/src"
-						cmdPath = c.Args().Get(1)
 						llbsrc = Local{Path: localPath}
+						cmdPath = c.Args().Get(1)
 					} else {
 						llbsrc = src.ViaGit{
-							URL:       gitUrl,
-							Ref:       gitRef,
+							URL:       c.Args().Get(0),
+							Ref:       c.Args().Get(1),
 							Name:      "llb",
 							AlwaysRun: true,
 						}
+						cmdPath = c.Args().Get(2)
 					}
 
 					llbdef, err := Build(LayerSpec(
 						Dep(LayerSpec(
 							Dep(Image{Ref: "docker.io/eriksipsma/golang-singleuser:latest"}),
-							Shell(`/sbin/apk add build-base`),
+							Shell(`/sbin/apk add build-base git`),
 						)),
 						BuildDep(Wrap(llbsrc, MountDir("/llbsrc"))),
 						Env("PATH", "/bin:/sbin:/usr/bin:/usr/local/go/bin:/go/bin"),
