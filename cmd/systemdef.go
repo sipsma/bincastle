@@ -30,6 +30,10 @@ func SystemDef(g *graph.Graph, execArgs ...graph.LayerSpecOpt) {
 		return
 	}
 
+	if len(execArgs) == 0 {
+		panic("no exec args provided to SystemDef")
+	}
+
 	execName := "home" // TODO should not be hardcoded
 	dt, err := g.Exec(execName, execArgs...).Marshal(context.Background(), llb.LinuxAmd64)
 	if err != nil {
