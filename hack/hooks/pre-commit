@@ -1,0 +1,5 @@
+#!/bin/sh
+
+unset GIT_LITERAL_PATHSPECS
+
+git diff --cached go.mod | grep 'replace github.com/sipsma/bincastle-distro' || exit 0 && exit 1
