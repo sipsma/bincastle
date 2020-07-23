@@ -121,6 +121,10 @@ func (l Layer) AddToMountTree(t *MountTree) error {
 
 	// TODO verify that l.Src isn't a file? files should use an OCIMount (which can't be merged)
 
+	// TODO need to handle symlinks better. Specifically, if the layer has a symlink to an abs path
+	// and you follow it in the middle of a path, you can end up checking whether something exists
+	// in the actual rootfs this is being executed in rather than just the layer rootfs.
+
 	curTree := t.tree
 	for {
 		if l.Dest == curTree.mountpoint {
