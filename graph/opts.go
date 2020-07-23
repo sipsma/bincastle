@@ -32,15 +32,16 @@ func Wrapped(wraps ...GraphOpt) SpecOpt {
 	})
 }
 
-func Unbootstrap(asSpec AsSpec, bootstraps ...AsSpec) AsSpec {
-	return Unbootstrapped(bootstraps...).ApplyToSpec(asSpec)
+func Replace(asSpec AsSpec, replacee AsSpec, replacer AsSpec) AsSpec {
+	return Replaced(replacee, replacer).ApplyToSpec(asSpec)
 }
 
-func Unbootstrapped(bootstraps ...AsSpec) SpecOpt {
+func Replaced(replacee AsSpec, replacer AsSpec) SpecOpt {
 	return SpecOptFunc(func(s AsSpec) AsSpec {
-		return BuildableSpec{&unbootstrap{
-			bootstrappedSpec: s,
-			bootstraps:       bootstraps,
+		return BuildableSpec{&replace{
+			spec:     s,
+			replacee: replacee,
+			replacer: replacer,
 		}}
 	})
 }

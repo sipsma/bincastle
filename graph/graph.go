@@ -137,43 +137,26 @@ func (ws *wrap) Build(depGraphs []*Graph) *Graph {
 	return depGraph
 }
 
-type unbootstrap struct {
-	bootstrappedSpec AsSpec
-	bootstraps       []AsSpec
+type replace struct {
+	spec     AsSpec
+	replacee AsSpec
+	replacer AsSpec
 }
 
-func (ubs *unbootstrap) Deps() []AsSpec {
-	return append([]AsSpec{ubs.bootstrappedSpec}, ubs.bootstraps...)
+func (r *replace) Deps() []AsSpec {
+	return []AsSpec{r.spec, r.replacee, r.replacer}
 }
 
-func (ubs *unbootstrap) Build(depGraphs []*Graph) *Graph {
+func (r *replace) Build(depGraphs []*Graph) *Graph {
 	g := depGraphs[0]
-	dgsts := make(map[digest.Digest]struct{})
-	for _, bootstrapGraph := range depGraphs[1:] {
-		if bootstrapGraph == nil {
-			continue
-		}
-		for _, root := range bootstrapGraph.roots {
-			dgsts[root.digest] = struct{}{}
-		}
-	}
-	if len(dgsts) == 0 {
-		return g
-	}
+	replacee := depGraphs[1]
+	replacer := depGraphs[2]
 
-	reachable := make(map[digest.Digest]struct{})
 	// old layer digest -> *Graph replacing it
 	oldToNew := make(map[digest.Digest]*Graph)
-	g.walk(func(l *Layer) error {
-		reachable[l.digest] = struct{}{}
-		if _, ok := dgsts[l.digest]; ok {
-			return SkipLayer
-		}
-		return nil
-	})
 	g.bottomUpWalk(func(l *Layer) {
-		if _, ok := reachable[l.digest]; !ok {
-			oldToNew[l.digest] = nil
+		if l.digest == replacee.digest {
+			oldToNew[l.digest] = replacer
 			return
 		}
 
@@ -195,11 +178,6 @@ func (ubs *unbootstrap) Build(depGraphs []*Graph) *Graph {
 			}
 		}
 		newDeps := mergeGraphs(newDepGraphs...)
-
-		if _, ok := dgsts[l.digest]; ok {
-			oldToNew[l.digest] = newDeps
-			return
-		}
 		newLayer.deps = newDeps
 		newLayer.digest = newLayer.calcDigest()
 		oldToNew[l.digest] = &newLayer.Graph
@@ -244,6 +222,10 @@ func Build(asSpec AsSpec, opts ...SpecOpt) *Graph {
 		newUnprocessed := make(map[*vtx]struct{})
 		for v := range unprocessed {
 			for _, dep := range v.Deps() {
+				if dep == nil {
+					v.deps = append(v.deps, nil)
+					continue
+				}
 				depVtx := vtxs[dep]
 				if depVtx == nil {
 					depVtx = newVtx(dep.Spec())
