@@ -15,9 +15,9 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/opencontainers/runc/libcontainer"
+	"github.com/sipsma/bincastle-distro/src"
 	"github.com/sipsma/bincastle/buildkit"
 	"github.com/sipsma/bincastle/ctr"
-	"github.com/sipsma/bincastle-distro/src"
 	. "github.com/sipsma/bincastle/graph"
 	"github.com/urfave/cli"
 	"golang.org/x/sys/unix"
@@ -39,11 +39,11 @@ var (
 
 	exportImportFlags = []cli.Flag{
 		&cli.StringFlag{
-			Name: "export",
+			Name:  "export",
 			Usage: "registry ref to export cached results to",
 		},
 		&cli.StringFlag{
-			Name: "import",
+			Name:  "import",
 			Usage: "registry ref to import cached results from",
 		},
 	}
@@ -121,9 +121,10 @@ func main() {
 					if !strings.HasPrefix(c.Args().Get(0), "https://") && !strings.HasPrefix(c.Args().Get(0), "ssh://") {
 						localDir := c.Args().Get(0)
 						mounts = mounts.With(ctr.BindMount{
-							Source:   localDir,
-							Dest:     "/src",
-							Readonly: true,
+							Source:    localDir,
+							Dest:      "/src",
+							Readonly:  true,
+							Recursive: true,
 						})
 					}
 
@@ -208,7 +209,7 @@ func main() {
 			{
 				Name:   internalRunArg,
 				Hidden: true,
-				Flags: exportImportFlags,
+				Flags:  exportImportFlags,
 				Action: func(c *cli.Context) (err error) {
 					localDirs := make(map[string]string)
 					var llbsrc AsSpec
@@ -240,8 +241,8 @@ func main() {
 						ScratchMount(`/build`),
 						Env("GOPATH", "/build"),
 						Shell(
-							`cd /llbsrc`,
-							fmt.Sprintf(`go build -o /llbgen %s`, filepath.Join("/llbsrc", cmdPath)),
+							fmt.Sprintf(`cd %s`, filepath.Join(`/llbsrc`, cmdPath)),
+							`go build -o /llbgen .`,
 						),
 						AlwaysRun(true),
 					)).AsBuildSource("/llbgen").Marshal(context.TODO(), llb.LinuxAmd64)
