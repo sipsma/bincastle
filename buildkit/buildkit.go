@@ -97,8 +97,9 @@ func Build(
 	ctx context.Context,
 	llbdef *llb.Definition,
 	localDirs map[string]string,
-	exportRef string,
-	importRef string,
+	exportCacheRef string,
+	importCacheRef string,
+	exportImageRef string,
 ) error {
 	// TODO timeout?
 	// TODO avoid connecting over socket, just use solver directly?
@@ -125,29 +126,41 @@ func Build(
 	}
 
 	var cacheExport []client.CacheOptionsEntry
-	if exportRef != "" {
+	if exportCacheRef != "" {
 		cacheExport = []client.CacheOptionsEntry{{
 			Type: "registry",
 			Attrs: map[string]string{
-				"ref":  exportRef,
+				"ref":  exportCacheRef,
 				"mode": "max", // TODO should this be configurable?
 			},
 		}}
 	}
 
 	var cacheImport []client.CacheOptionsEntry
-	if importRef != "" {
+	if importCacheRef != "" {
 		cacheImport = []client.CacheOptionsEntry{{
 			Type: "registry",
 			Attrs: map[string]string{
-				"ref": importRef,
+				"ref": importCacheRef,
 			},
 		}}
+	}
+
+	var exports []client.ExportEntry
+	if exportImageRef != "" {
+		exports = append(exports, client.ExportEntry{
+			Type: "image",
+			Attrs: map[string]string{
+				"name": exportImageRef,
+				"push": "true",
+			},
+		})
 	}
 
 	solveOpt := client.SolveOpt{
 		Frontend:            "",
 		FrontendAttrs:       nil,
+		Exports:             exports,
 		CacheExports:        cacheExport,
 		CacheImports:        cacheImport,
 		Session:             attachable,

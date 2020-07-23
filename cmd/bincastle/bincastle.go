@@ -39,12 +39,24 @@ var (
 
 	exportImportFlags = []cli.Flag{
 		&cli.StringFlag{
-			Name:  "export",
+			Name:  "export-cache",
 			Usage: "registry ref to export cached results to",
 		},
 		&cli.StringFlag{
-			Name:  "import",
+			Name:  "import-cache",
 			Usage: "registry ref to import cached results from",
+		},
+	}
+
+	// TODO imageExportFlags are only here for now because they are only meant
+	// for internal use. In the future, once image export is more intuitive in
+	// that it results in a whole graph getting exported rather than just the
+	// single exec layer, it will be made public
+	imageExportFlags = []cli.Flag{
+		&cli.StringFlag{
+			Name: "export-image",
+			Usage: "hidden: export the result of the exec as an image",
+			Hidden: true,
 		},
 	}
 )
@@ -70,7 +82,7 @@ func main() {
 			{
 				Name:  runArg,
 				Usage: "start the system in a rootless container",
-				Flags: exportImportFlags,
+				Flags:  append(exportImportFlags, imageExportFlags...),
 				Action: func(c *cli.Context) (err error) {
 					varDir := filepath.Join(homeDir, ".bincastle", "var")
 					err = os.MkdirAll(varDir, 0700)
@@ -209,7 +221,7 @@ func main() {
 			{
 				Name:   internalRunArg,
 				Hidden: true,
-				Flags:  exportImportFlags,
+				Flags:  append(exportImportFlags, imageExportFlags...),
 				Action: func(c *cli.Context) (err error) {
 					localDirs := make(map[string]string)
 					var llbsrc AsSpec
@@ -280,8 +292,9 @@ func main() {
 						errCh <- buildkit.Build(ctx,
 							llbdef,
 							localDirs,
-							c.String("export"),
-							c.String("import"),
+							c.String("export-cache"),
+							c.String("import-cache"),
+							c.String("export-image"),
 						)
 					}()
 
