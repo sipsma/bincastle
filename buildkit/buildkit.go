@@ -95,11 +95,13 @@ var (
 
 func Build(
 	ctx context.Context,
+	// TODO put these args into a struct
 	llbdef *llb.Definition,
 	localDirs map[string]string,
 	exportCacheRef string,
 	importCacheRef string,
 	exportImageRef string,
+	localExportDir string,
 ) error {
 	// TODO timeout?
 	// TODO avoid connecting over socket, just use solver directly?
@@ -147,6 +149,7 @@ func Build(
 	}
 
 	var exports []client.ExportEntry
+
 	if exportImageRef != "" {
 		exports = append(exports, client.ExportEntry{
 			Type: "image",
@@ -154,6 +157,13 @@ func Build(
 				"name": exportImageRef,
 				"push": "true",
 			},
+		})
+	}
+
+	if localExportDir != "" {
+		exports = append(exports, client.ExportEntry{
+			Type:      "local",
+			OutputDir: localExportDir,
 		})
 	}
 
@@ -190,7 +200,7 @@ func Build(
 	return eg.Wait()
 }
 
-func Buildkitd() (func(context.Context) error, error) {
+func Buildkitd(mountBackend ctr.MountBackend) (func(context.Context) error, error) {
 	server := grpc.NewServer(
 		grpc.MaxRecvMsgSize(268435456),
 		grpc.MaxSendMsgSize(268435456),
@@ -230,7 +240,7 @@ func Buildkitd() (func(context.Context) error, error) {
 
 	// TODO call cleanup in all error cases
 	// TODO get rid of imageBackend?
-	controller, cleanup, _, err := newController()
+	controller, cleanup, _, err := newController(mountBackend)
 	if err != nil {
 		err = errors.Wrap(err, "failed to create controller")
 		return nil, err
@@ -255,13 +265,13 @@ func Buildkitd() (func(context.Context) error, error) {
 	}, nil
 }
 
-func newController() (*control.Controller, func() error, *ImageBackend, error) {
+func newController(mountBackend ctr.MountBackend) (*control.Controller, func() error, *ImageBackend, error) {
 	sessionManager, err := session.NewManager()
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	wc, cleanup, imageBackend, err := newWorkerController()
+	wc, cleanup, imageBackend, err := newWorkerController(mountBackend)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -302,10 +312,10 @@ func newController() (*control.Controller, func() error, *ImageBackend, error) {
 	return ctrler, cleanup, imageBackend, nil
 }
 
-func newWorkerController() (*worker.Controller, func() error, *ImageBackend, error) {
+func newWorkerController(mountBackend ctr.MountBackend) (*worker.Controller, func() error, *ImageBackend, error) {
 	wc := &worker.Controller{}
 
-	workers, cleanup, imageBackend, err := RuncWorkers(Root, gcKeepStorage)
+	workers, cleanup, imageBackend, err := RuncWorkers(Root, gcKeepStorage, mountBackend)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -321,9 +331,9 @@ func newWorkerController() (*worker.Controller, func() error, *ImageBackend, err
 }
 
 func RuncWorkers(
-	root string, gcKeepStorage int64,
+	root string, gcKeepStorage int64, mountBackend ctr.MountBackend,
 ) ([]worker.Worker, func() error, *ImageBackend, error) {
-	w, cleanup, imageBackend, err := runcWorker(root, gcKeepStorage)
+	w, cleanup, imageBackend, err := runcWorker(root, gcKeepStorage, mountBackend)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -331,7 +341,7 @@ func RuncWorkers(
 }
 
 func runcWorker(
-	root string, gcKeepStorage int64,
+	root string, gcKeepStorage int64, mountBackend ctr.MountBackend,
 ) (worker.Worker, func() error, *ImageBackend, error) {
 	snapshotterName := "overlayfs"
 	name := fmt.Sprintf("runc-%s", snapshotterName)
@@ -400,7 +410,7 @@ func runcWorker(
 		SearchDomains: []string{"localdomain"},
 	}
 
-	newExecutor, err := newRuncExecutor(root, dnsConfig)
+	newExecutor, err := newRuncExecutor(root, dnsConfig, mountBackend)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -469,6 +479,7 @@ type runcExecutor struct {
 	execCount    int
 	execCond     *sync.Cond
 	shutdown     bool
+	mountBackend ctr.MountBackend
 }
 
 func (e *runcExecutor) resolvConfPath() string {
@@ -491,11 +502,13 @@ type Executor interface {
 func newRuncExecutor(
 	stateRootDir string,
 	dnsConfig *oci.DNSConfig,
+	mountBackend ctr.MountBackend,
 ) (Executor, error) {
 	var execMu sync.Mutex
 	newExecutor := &runcExecutor{
 		stateRootDir: stateRootDir,
 		execCond:     sync.NewCond(&execMu),
+		mountBackend: mountBackend,
 	}
 
 	// TODO handle options
@@ -674,15 +687,20 @@ func (e *runcExecutor) Run(
 				Source: "/run/ssh-agent.sock",
 			},
 			ctr.BindMount{
-				Dest:     "/self",
-				Source:   "/self",
-				Readonly: true,
+				Dest:   "/self",
+				Source: "/self",
+				// TODO Readonly: true,
 			},
 			ctr.BindMount{
 				Dest:   "/inner",
 				Source: ctrState.InnerDir(),
 			},
+			ctr.BindMount{
+				Dest:   "/dev/fuse",
+				Source: "/dev/fuse",
+			},
 		),
+		MountBackend: e.mountBackend,
 	}, isInteractive)
 	if err != nil {
 		return err

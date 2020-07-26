@@ -13,7 +13,7 @@ import (
 	"github.com/sipsma/bincastle/graph"
 )
 
-func SystemDef(g *graph.Graph, execArgs ...graph.LayerSpecOpt) {
+func SystemDef(g *graph.Graph) {
 	var dumpJsonFlag bool
 	var dumpDotFlag bool
 
@@ -30,15 +30,14 @@ func SystemDef(g *graph.Graph, execArgs ...graph.LayerSpecOpt) {
 		return
 	}
 
-	if len(execArgs) == 0 {
-		panic("no exec args provided to SystemDef")
-	}
-
-	execName := "home" // TODO should not be hardcoded
-	dt, err := g.Exec(execName, execArgs...).Marshal(context.Background(), llb.LinuxAmd64)
+	dts, err := g.Marshal(context.Background(), llb.LinuxAmd64)
 	if err != nil {
 		panic(err)
 	}
+	if len(dts) > 1 {
+		panic("no support for multi-root graphs at this time") // TODO kinda useless error message
+	}
+	dt := dts[0]
 
 	if dumpJsonFlag {
 		err = dumpJson(dt, os.Stdout)

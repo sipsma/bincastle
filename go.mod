@@ -32,6 +32,7 @@ require (
 	github.com/opencontainers/image-spec v1.0.1
 	github.com/opencontainers/runc v1.0.0-rc9.0.20200221051241-688cf6d43cc4
 	github.com/opencontainers/runtime-spec v1.0.2
+	github.com/opentracing/opentracing-go v1.1.0
 	github.com/pkg/errors v0.9.1
 	github.com/sipsma/bincastle-distro v0.0.0-20200723201256-2997f073c25d
 	github.com/stretchr/testify v1.5.1

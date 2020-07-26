@@ -4,8 +4,8 @@ export GO111MODULE=on
 CACHE_REGISTRY ?= localhost:5000
 CACHE_IMAGE_REF ?= buildcache:latest
 
-FUSE_OVERLAYFS_REGISTRY ?= localhost:5000
-FUSE_OVERLAYFS_IMAGE_REF ?= fuse-overlayfs:latest
+FUSE_OVERLAYFS_REGISTRY ?= eriksipsma
+FUSE_OVERLAYFS_IMAGE_REF ?= bincastle-fuse-overlayfs:latest
 
 BINCASTLE=$(HOME)/.bincastle
 BINCASTLE_BIN = $(CURDIR)/bincastle

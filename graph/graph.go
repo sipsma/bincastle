@@ -18,6 +18,7 @@ import (
 type Spec interface {
 	Buildable
 	AsSpec
+	// TODO add AsGraph method that allows this to be converted to a Graph?
 	With(opts ...SpecOpt) Spec
 }
 
@@ -305,20 +306,36 @@ func (g *Graph) Spec() Spec {
 	return BuildableSpec{graphSpec{g}}
 }
 
-func (g *Graph) Exec(name string, opts ...LayerSpecOpt) llb.State {
+func (g *Graph) Marshal(ctx context.Context, co ...llb.ConstraintsOpt) ([]*llb.Definition, error) {
+	var defs []*llb.Definition
+	for _, root := range g.roots {
+		def, err := root.state.Marshal(ctx, co...)
+		if err != nil {
+			return nil, err
+		}
+		defs = append(defs, def)
+	}
+	return defs, nil
+}
+
+func (g *Graph) Exec(name string, opts ...LayerSpecOpt) *Graph {
 	return Build(LayerSpec(
 		Dep(g),
 		Env("BINCASTLE_INTERACTIVE", name),
 		AlwaysRun(true),
 		MergeLayerSpecOpts(opts...),
-	)).roots[0].state
+	))
 }
 
-func (g *Graph) AsBuildSource(llbgenCmd string) llb.State {
-	return Build(LayerSpec(
+func (g *Graph) AsBuildSource(llbgenCmd string) *Graph {
+	newg := Build(LayerSpec(
 		BuildDep(g),
 		Shell(fmt.Sprintf("%s > /llboutput", llbgenCmd)),
-	)).roots[0].state.With(llbbuild.Build(llbbuild.WithFilename("/llboutput")))
+	))
+
+	newg.roots[0].state = newg.roots[0].state.With(llbbuild.Build(llbbuild.WithFilename("/llboutput")))
+	newg.digest = newg.calcDigest()
+	return newg
 }
 
 // TODO it would probably be better to just expose Walk and have this and similar

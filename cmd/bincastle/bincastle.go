@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/snapshots/overlay"
 	"github.com/hashicorp/go-multierror"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/opencontainers/runc/libcontainer"
@@ -59,7 +61,23 @@ var (
 			Hidden: true,
 		},
 	}
+
+	mountBackendFlags = []cli.Flag{
+		&cli.StringFlag{
+			Name: "mount-backend",
+			Usage: "hidden: which type of mounts to use for merges (native overlay or fuse)",
+			Hidden: true, // TODO not ready to make this official yet
+		},
+	}
 )
+
+func joinflags(flagss ...[]cli.Flag) []cli.Flag {
+	var joined []cli.Flag
+	for _, flags := range flagss {
+		joined = append(joined, flags...)
+	}
+	return joined
+}
 
 func init() {
 	if len(os.Args) > 1 && os.Args[1] == ctr.RuncInitArg {
@@ -82,7 +100,7 @@ func main() {
 			{
 				Name:  runArg,
 				Usage: "start the system in a rootless container",
-				Flags:  append(exportImportFlags, imageExportFlags...),
+				Flags:  joinflags(exportImportFlags, imageExportFlags, mountBackendFlags),
 				Action: func(c *cli.Context) (err error) {
 					varDir := filepath.Join(homeDir, ".bincastle", "var")
 					err = os.MkdirAll(varDir, 0700)
@@ -125,7 +143,11 @@ func main() {
 						ctr.BindMount{
 							Dest:     "/self",
 							Source:   selfBin,
-							Readonly: true,
+							// TODO Readonly: true,
+						},
+						ctr.BindMount{
+							Dest:     "/dev/fuse",
+							Source:   "/dev/fuse",
 						},
 					)
 
@@ -135,7 +157,7 @@ func main() {
 						mounts = mounts.With(ctr.BindMount{
 							Source:    localDir,
 							Dest:      "/src",
-							Readonly:  true,
+							// TODO Readonly:  true,
 							Recursive: true,
 						})
 					}
@@ -166,6 +188,7 @@ func main() {
 						},
 						Hostname: "bincastle",
 						Mounts:   mounts,
+						MountBackend: ctr.OverlayBackend{}, // TODO
 					}, true)
 					if err != nil {
 						return fmt.Errorf(
@@ -221,7 +244,7 @@ func main() {
 			{
 				Name:   internalRunArg,
 				Hidden: true,
-				Flags:  append(exportImportFlags, imageExportFlags...),
+				Flags:  joinflags(exportImportFlags, imageExportFlags, mountBackendFlags),
 				Action: func(c *cli.Context) (err error) {
 					localDirs := make(map[string]string)
 					var llbsrc AsSpec
@@ -242,7 +265,7 @@ func main() {
 						cmdPath = c.Args().Get(2)
 					}
 
-					llbdef, err := Build(LayerSpec(
+					llbdefs, err := Build(LayerSpec(
 						Dep(LayerSpec(
 							Dep(Image{Ref: "docker.io/eriksipsma/golang-singleuser:latest"}),
 							Shell(`/sbin/apk add build-base git`),
@@ -261,6 +284,31 @@ func main() {
 					if err != nil {
 						return err
 					}
+					if len(llbdefs) > 1 {
+						return errors.New("invalid multi-root graph") // TODO kinda useless error message
+					}
+					llbdef := llbdefs[0]
+
+					var mountBackend ctr.MountBackend
+					mountBackendName := c.String("mount-backend")
+					if mountBackendName == "" || mountBackendName == "native-overlay" {
+						mountBackend = ctr.OverlayBackend{}
+						if err := overlay.Supported("/var"); err != nil {
+							return fmt.Errorf("native overlays not supported: %w", err)
+						}
+					}
+					var needFuseOverlayfs bool
+					if mountBackendName == "fuse-overlay" {
+						// TODO don't hardcode binary location, also /var is a weird place for it (but need somewhere writable)
+						if _, err := os.Stat("/var/fuse-overlayfs"); os.IsNotExist(err) {
+							needFuseOverlayfs = true
+						} else if err != nil {
+							return err
+						}
+						// TODO check for /dev/fuse
+						// TODO check that fuse works inside userns? it won't if kernel < v4.18
+						mountBackend = ctr.FuseOverlayfsBackend{FuseOverlayfsBin: "/var/fuse-overlayfs"}
+					}
 
 					sigchan := make(chan os.Signal, 1)
 					signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -271,7 +319,7 @@ func main() {
 						return ctr.ContainerExistsError{ctrName}
 					}
 
-					serve, err := buildkit.Buildkitd()
+					serve, err := buildkit.Buildkitd(mountBackend)
 					if err != nil {
 						return err
 					}
@@ -289,12 +337,27 @@ func main() {
 
 					go func() {
 						defer cancel()
+
+						if needFuseOverlayfs {
+							if fuseoverlayDef, err := llb.Image(
+								// TODO don't hardcode
+								"eriksipsma/bincastle-fuse-overlayfs",
+							).Marshal(ctx, llb.LinuxAmd64); err != nil {
+								errCh <- err
+								return
+							} else if err := buildkit.Build(ctx, fuseoverlayDef, nil, "", "", "", "/var"); err != nil {
+								errCh <- err
+								return
+							}
+						}
+
 						errCh <- buildkit.Build(ctx,
 							llbdef,
 							localDirs,
 							c.String("export-cache"),
 							c.String("import-cache"),
 							c.String("export-image"),
+							"",
 						)
 					}()
 

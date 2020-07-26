@@ -15,16 +15,16 @@ func (mounts Mounts) With(more ...MountTreeOpt) Mounts {
 	return append(mounts, more...)
 }
 
-func (mounts Mounts) OCIMounts(state ContainerState) ([]oci.Mount, error) {
+func (mounts Mounts) OCIMounts(state ContainerState, backend MountBackend) ([]oci.Mount, map[string]string, CleanupStack, error) {
 	mtree := &MountTree{tree: &tree{
 		mountpoint: "/",
 	}}
 	for _, opt := range mounts {
 		if err := opt.AddToMountTree(mtree); err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 	}
-	return mtree.OCIMounts(state), nil
+	return backend.SetupTree(mtree, state)
 }
 
 type MountTree struct {
@@ -32,55 +32,11 @@ type MountTree struct {
 	index int
 }
 
-func (t *MountTree) OCIMounts(state ContainerState) []oci.Mount {
-	var ocimounts []oci.Mount
-	curTrees := []*tree{t.tree}
-	for len(curTrees) > 0 {
-		var nextTrees []*tree
-		for _, curTree := range curTrees {
-			if ocimount := curTree.toOCIMount(state); ocimount != nil {
-				ocimounts = append(ocimounts, *ocimount)
-			}
-			nextTrees = append(nextTrees, curTree.submounts...)
-		}
-		curTrees = nextTrees
-	}
-	return ocimounts
-}
-
 type tree struct {
 	mountpoint string
 	submounts  []*tree
 	srcs       []indexedSrc
 	ociMount   *OCIMount
-}
-
-func (t *tree) toOCIMount(state ContainerState) *oci.Mount {
-	if t.ociMount != nil {
-		return (*oci.Mount)(t.ociMount)
-	}
-
-	if len(t.srcs) == 0 {
-		return nil
-	}
-
-	// overlay has lowerdirs from top->bottom, but we store them by
-	// appending top layers to the end (bottom->top), so reverse srcs
-	lowerdirs := make([]string, len(t.srcs))
-	for i, isrc := range t.srcs {
-		lowerdirs[len(t.srcs)-1-i] = isrc.src
-	}
-	overlayDir := state.OverlayDir(t.mountpoint)
-	return &oci.Mount{
-		Source:      "none",
-		Destination: t.mountpoint,
-		Type:        "overlay",
-		Options: overlayOptions{
-			LowerDirs: lowerdirs,
-			UpperDir:  overlayDir.UpperDir(),
-			WorkDir:   overlayDir.WorkDir(),
-		}.OptionsSlice(),
-	}
 }
 
 type indexedSrc struct {

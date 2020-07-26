@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -184,137 +183,12 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 		return os.RemoveAll(d.rootfsDir())
 	})
 
-	mounts, err := def.Mounts.OCIMounts(d)
+	mounts, diffDirs, mountCleanups, err := def.Mounts.OCIMounts(d, def.MountBackend)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to merge mounts for %s: %w", d.ContainerID(), err)
 	}
-
-	// TODO
-	var allLowerDirs []string
-
-	var lowerdirIndex uint
-	for i, m := range mounts {
-		if m.Type != "overlay" {
-			continue
-		}
-		overlayDir := d.OverlayDir(m.Destination)
-		overlayOpts := parseOverlay(m.Options)
-
-		err = os.MkdirAll(overlayOpts.UpperDir, 0700)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create upper dir: %w", err)
-		}
-
-		err = os.MkdirAll(overlayOpts.WorkDir, 0700)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create work dir: %w", err)
-		}
-		postkillCleanups = postkillCleanups.Push(func() error {
-			return os.RemoveAll(overlayOpts.WorkDir)
-		})
-
-		err = os.MkdirAll(overlayDir.PrivateDir(), 0700)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"failed to create private lower dir: %w", err)
-		}
-		postkillCleanups = postkillCleanups.Push(func() error {
-			return os.RemoveAll(overlayDir.PrivateDir())
-		})
-
-		if i < len(mounts)-1 {
-			for _, laterMount := range mounts[i+1:] {
-				if !isUnderDir(laterMount.Destination, m.Destination) {
-					continue
-				}
-
-				relPath, err := filepath.Rel(m.Destination, laterMount.Destination)
-				if err != nil {
-					return nil, fmt.Errorf(
-						"failed to get rel path for private lower dir: %w", err)
-				}
-				privateDest := filepath.Join(overlayDir.PrivateDir(), relPath)
-
-				if HasBind(laterMount.Options) || HasRBind(laterMount.Options) {
-					stat, err := os.Stat(laterMount.Source)
-					if err != nil {
-						return nil, fmt.Errorf(
-							"failed to stat bind mount dest for private lower dir: %w", err)
-					}
-					if !stat.IsDir() {
-						// TODO just assuming it's a file, should handle other cases?
-						parentDir := filepath.Dir(privateDest)
-						err := os.MkdirAll(parentDir, 0700) // TODO set same perms
-						if err != nil {
-							return nil, fmt.Errorf(
-								"failed to mkdir bind mount dest parent dir for private lower dir: %w", err)
-						}
-						err = ioutil.WriteFile(privateDest, nil, 0700) // TODO fix perms
-						if err != nil && !os.IsNotExist(err) {
-							return nil, fmt.Errorf(
-								"failed to touch bind mount dest for private lower dir: %w", err)
-						}
-						continue
-					}
-				}
-
-				err = os.MkdirAll(privateDest, 0700) // TODO fix perms
-				if err != nil {
-					return nil, fmt.Errorf(
-						"failed to mkdir private lower dir: %w", err)
-				}
-			}
-		}
-
-		overlayOpts.LowerDirs = append(overlayOpts.LowerDirs,
-			overlayDir.PrivateDir())
-
-		// setup shorthand lowerdir symlinks, which
-		// help keep the length of the options provided to the mount syscall
-		// under its 1 page size limit
-		var newLowerdirs []string
-		for _, lowerdir := range overlayOpts.LowerDirs {
-			newLowerdir := d.lowerDirSymlink(lowerdirIndex)
-			lowerdirIndex += 1
-			newLowerdirs = append(newLowerdirs, filepath.Base(newLowerdir))
-			allLowerDirs = append(allLowerDirs, newLowerdir)
-
-			err = os.Symlink(lowerdir, newLowerdir)
-			if err != nil && !os.IsNotExist(err) {
-				return nil, fmt.Errorf(
-					"failed to symlink lowerdir: %w", err)
-			}
-		}
-
-		mounts[i] = oci.Mount{
-			Source:      m.Source,
-			Destination: m.Destination,
-			Type:        m.Type,
-			Options: overlayOptions{
-				LowerDirs: newLowerdirs,
-				UpperDir:  overlayOpts.UpperDir,
-				WorkDir:   overlayOpts.WorkDir,
-				Extra:     overlayOpts.Extra,
-			}.OptionsSlice(),
-		}
-	}
-
-	// TODO
-	for i, ld := range allLowerDirs {
-		src, err := filepath.EvalSymlinks(ld)
-		if err != nil {
-			// TODO
-			fmt.Printf("eval symlink err %v\n", err)
-			continue
-		}
-		mounts = append(mounts, oci.Mount{
-			Source:      src,
-			Destination: filepath.Join("/debug", strconv.Itoa(i)),
-			Type:        "none",
-			Options:     []string{"bind", "ro"},
-		})
-	}
+	postkillCleanups = append(mountCleanups, postkillCleanups...)
 
 	inFifoCh := make(chan io.ReadWriteCloser)
 	go func() {
@@ -514,6 +388,7 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 		prekillCleanup:  prekillCleanups,
 		postkillCleanup: postkillCleanups,
 		mounts:          mounts,
+		diffDirs:        diffDirs,
 		consoleResizeCh: consoleResizeCh,
 	}, nil
 }
@@ -530,6 +405,10 @@ func (d OverlayDir) WorkDir() string {
 
 func (d OverlayDir) PrivateDir() string {
 	return filepath.Join(string(d), "private")
+}
+
+func (d OverlayDir) MountDir() string {
+	return filepath.Join(string(d), "mount")
 }
 
 type IODir string
@@ -565,6 +444,7 @@ type ContainerProc struct {
 
 type ContainerDef struct {
 	ContainerProc
+	MountBackend
 	Hostname string
 	Mounts   Mounts
 }
@@ -574,6 +454,7 @@ type CleanupStack []func() error
 func (cleanups CleanupStack) Push(f func() error) CleanupStack {
 	return append([]func() error{f}, cleanups...)
 }
+
 func (cleanups CleanupStack) Cleanup() error {
 	var err error
 	for _, cleanup := range cleanups {
@@ -587,6 +468,7 @@ type container struct {
 	initProc        libcontainer.Process
 	runcCtr         libcontainer.Container
 	mounts          []oci.Mount
+	diffDirs        map[string]string
 	consoleResizeCh chan<- console.WinSize
 
 	prekillCleanup  CleanupStack
@@ -598,14 +480,7 @@ type container struct {
 }
 
 func (c *container) DiffDirs() map[string]string {
-	diffDirs := make(map[string]string)
-	for _, m := range c.mounts {
-		if m.Type != "overlay" {
-			continue
-		}
-		diffDirs[m.Destination] = parseOverlay(m.Options).UpperDir
-	}
-	return diffDirs
+	return c.diffDirs
 }
 
 func (c *container) Destroy(waitTimeout time.Duration) (rerr error) {
