@@ -36,7 +36,7 @@ require (
 	github.com/sipsma/bincastle-distro v0.0.0-20200723201256-2997f073c25d
 	github.com/stretchr/testify v1.5.1
 	github.com/urfave/cli v1.22.3
-	go.etcd.io/bbolt v1.3.4
+	go.etcd.io/bbolt v1.3.5
 	golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a
 	golang.org/x/sys v0.0.0-20200321134203-328b4cd54aae
 	google.golang.org/grpc v1.28.0
