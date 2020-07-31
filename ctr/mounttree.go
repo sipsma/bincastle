@@ -1,6 +1,7 @@
 package ctr
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,19 +13,19 @@ import (
 type Mounts []MountTreeOpt
 
 func (mounts Mounts) With(more ...MountTreeOpt) Mounts {
-	return append(mounts, more...)
+	return append(mounts, more... )
 }
 
-func (mounts Mounts) OCIMounts(state ContainerState, backend MountBackend) ([]oci.Mount, map[string]string, CleanupStack, error) {
+func (mounts Mounts) OCIMounts(state ContainerState, upperdir, workdir string, backend MountBackend) ([]oci.Mount, CleanupStack, error) {
 	mtree := &MountTree{tree: &tree{
 		mountpoint: "/",
 	}}
 	for _, opt := range mounts {
 		if err := opt.AddToMountTree(mtree); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 	}
-	return backend.SetupTree(mtree, state)
+	return backend.SetupTree(mtree, state, upperdir, workdir)
 }
 
 type MountTree struct {
@@ -64,7 +65,7 @@ func (e InvalidMergedMountErr) Error() string {
 func (l Layer) AddToMountTree(t *MountTree) error {
 	src, err := filepath.EvalSymlinks(l.Src)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to evaluate symlinks in %q: %w", l.Src, err)
 	}
 	src, err = filepath.Abs(src)
 	if err != nil {
@@ -80,6 +81,7 @@ func (l Layer) AddToMountTree(t *MountTree) error {
 	// TODO need to handle symlinks better. Specifically, if the layer has a symlink to an abs path
 	// and you follow it in the middle of a path, you can end up checking whether something exists
 	// in the actual rootfs this is being executed in rather than just the layer rootfs.
+	// TODO I think this is what cyphar/securejoin is for
 
 	curTree := t.tree
 	for {
@@ -163,7 +165,7 @@ func (m OCIMount) AddToMountTree(t *MountTree) error {
 	// TODO cleanup m.Destination
 	curTree := t.tree
 	for {
-		if m.Destination == curTree.mountpoint {
+		if m.Destination == curTree.mountpoint && (len(curTree.srcs) > 0 || curTree.ociMount != nil) {
 			return InvalidMergedMountErr{}
 		}
 

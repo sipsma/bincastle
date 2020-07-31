@@ -9,7 +9,6 @@ import (
 	"sort"
 
 	"github.com/moby/buildkit/client/llb"
-	"github.com/moby/buildkit/client/llb/llbbuild"
 	"github.com/moby/buildkit/solver/llbsolver"
 	"github.com/opencontainers/go-digest"
 	"github.com/sipsma/bincastle/util"
@@ -306,18 +305,6 @@ func (g *Graph) Spec() Spec {
 	return BuildableSpec{graphSpec{g}}
 }
 
-func (g *Graph) Marshal(ctx context.Context, co ...llb.ConstraintsOpt) ([]*llb.Definition, error) {
-	var defs []*llb.Definition
-	for _, root := range g.roots {
-		def, err := root.state.Marshal(ctx, co...)
-		if err != nil {
-			return nil, err
-		}
-		defs = append(defs, def)
-	}
-	return defs, nil
-}
-
 func (g *Graph) Exec(name string, opts ...LayerSpecOpt) *Graph {
 	return Build(LayerSpec(
 		Dep(g),
@@ -325,17 +312,6 @@ func (g *Graph) Exec(name string, opts ...LayerSpecOpt) *Graph {
 		AlwaysRun(true),
 		MergeLayerSpecOpts(opts...),
 	))
-}
-
-func (g *Graph) AsBuildSource(llbgenCmd string) *Graph {
-	newg := Build(LayerSpec(
-		BuildDep(g),
-		Shell(fmt.Sprintf("%s > /llboutput", llbgenCmd)),
-	))
-
-	newg.roots[0].state = newg.roots[0].state.With(llbbuild.Build(llbbuild.WithFilename("/llboutput")))
-	newg.digest = newg.calcDigest()
-	return newg
 }
 
 // TODO it would probably be better to just expose Walk and have this and similar

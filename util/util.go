@@ -8,8 +8,8 @@ import (
 )
 
 type LowerDir struct {
-	Index     int
-	Dest      string
+	Index          int
+	Dest           string
 	DiscardChanges bool
 }
 

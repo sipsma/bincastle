@@ -14,11 +14,10 @@ import (
 )
 
 func SystemDef(g *graph.Graph) {
-	var dumpJsonFlag bool
+	// var dumpJsonFlag bool
 	var dumpDotFlag bool
 
-	flag.BoolVar(&dumpJsonFlag, "json", false,
-		"write formatted json instead of marshalled protobuf (for debugging)")
+	// TODO re-add support flag.BoolVar(&dumpJsonFlag, "json", false, "write formatted json instead of marshalled protobuf (for debugging)")
 	flag.BoolVar(&dumpDotFlag, "dot", false,
 		"write formatted dotviz instead of marshalled protobuf (for debugging)")
 	flag.Parse()
@@ -30,25 +29,22 @@ func SystemDef(g *graph.Graph) {
 		return
 	}
 
-	dts, err := g.Marshal(context.Background(), llb.LinuxAmd64)
+	layers, err := g.MarshalLayers(context.Background(), llb.LinuxAmd64)
 	if err != nil {
 		panic(err)
 	}
-	if len(dts) > 1 {
-		panic("no support for multi-root graphs at this time") // TODO kinda useless error message
-	}
-	dt := dts[0]
 
-	if dumpJsonFlag {
-		err = dumpJson(dt, os.Stdout)
-	} else {
-		err = llb.WriteTo(dt, os.Stdout)
-	}
+	bytes, err := json.Marshal(layers)
 	if err != nil {
+		panic(err)
+	}
+
+	if _, err := os.Stdout.Write(bytes); err != nil {
 		panic(err)
 	}
 }
 
+// TODO this doesn't work after switch to MarshalLayers, need to update it
 func dumpJson(def *llb.Definition, output io.Writer) error {
 	enc := json.NewEncoder(output)
 	enc.SetIndent("", "  ")

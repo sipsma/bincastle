@@ -2,7 +2,6 @@ package ctr
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -109,17 +108,48 @@ func (d ContainerState) lowerDirSymlink(index uint) string {
 	return filepath.Join(d.rootfsDir(), strconv.Itoa(int(index)))
 }
 
-func (d ContainerState) overlayDirs() string {
-	return filepath.Join(string(d), "overlays")
+func (d ContainerState) subOverlayDirs() string {
+	return filepath.Join(string(d), "suboverlays")
 }
 
-func (d ContainerState) OverlayDir(ctrPath string) OverlayDir {
-	return OverlayDir(filepath.Join(d.overlayDirs(),
-		base64.RawURLEncoding.EncodeToString([]byte(ctrPath))))
+func (d ContainerState) SubOverlayDir(ctrPath string) OverlayDir {
+	return OverlayDir(filepath.Join(d.subOverlayDirs(), ctrPath))
+}
+
+func (d ContainerState) OverlayDir() OverlayDir {
+	return OverlayDir(filepath.Join(string(d), "overlay"))
 }
 
 func (d ContainerState) ContainerID() string {
 	return filepath.Base(string(d))
+}
+
+type OverlayDir string
+
+func (d OverlayDir) UpperDir() string {
+	return filepath.Join(string(d), "upper")
+}
+
+func (d OverlayDir) WorkDir() string {
+	return filepath.Join(string(d), "work")
+}
+
+func (d OverlayDir) PrivateDir() string {
+	return filepath.Join(string(d), "private")
+}
+
+func (d OverlayDir) MountDir() string {
+	return filepath.Join(string(d), "mount")
+}
+
+type IODir string
+
+func (d IODir) TTYOutFifo() string {
+	return filepath.Join(string(d), "out")
+}
+
+func (d IODir) TTYInFifo() string {
+	return filepath.Join(string(d), "in")
 }
 
 type ContainerExistsError struct {
@@ -149,14 +179,15 @@ func (d ContainerState) ContainerExists() bool {
 	return err == nil
 }
 
-func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error) {
+func (d ContainerState) Start(def ContainerDef) (Container, error) {
 	if d.ContainerExists() {
 		return nil, ContainerExistsError{d.ContainerID()}
 	}
 
 	prekillCleanups := CleanupStack(nil)
 	postkillCleanups := CleanupStack(nil).Push(func() error {
-		if !persist {
+		if !def.Persist {
+			// TODO need to handle when upperdir/workdir are outside this tree
 			return os.RemoveAll(string(d))
 		}
 		return nil
@@ -183,7 +214,16 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 		return os.RemoveAll(d.rootfsDir())
 	})
 
-	mounts, diffDirs, mountCleanups, err := def.Mounts.OCIMounts(d, def.MountBackend)
+	upperdir, workdir := def.UpperDir, def.WorkDir
+	if upperdir == "" && !def.ReadOnlyRootfs {
+		upperdir = d.OverlayDir().UpperDir()
+	}
+	if workdir == "" && !def.ReadOnlyRootfs {
+		workdir = d.OverlayDir().WorkDir()
+	}
+
+	// TODO Is ReadOnlyRootfs fully enforced?
+	mounts, mountCleanups, err := def.Mounts.OCIMounts(d, upperdir, workdir, def.MountBackend)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to merge mounts for %s: %w", d.ContainerID(), err)
@@ -353,7 +393,6 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 		},
 		CgroupName:       "",
 		UseSystemdCgroup: false,
-		NoPivotRoot:      false,
 		NoNewKeyring:     true,
 		RootlessEUID:     true,
 		RootlessCgroups:  true,
@@ -388,37 +427,8 @@ func (d ContainerState) Start(def ContainerDef, persist bool) (Container, error)
 		prekillCleanup:  prekillCleanups,
 		postkillCleanup: postkillCleanups,
 		mounts:          mounts,
-		diffDirs:        diffDirs,
 		consoleResizeCh: consoleResizeCh,
 	}, nil
-}
-
-type OverlayDir string
-
-func (d OverlayDir) UpperDir() string {
-	return filepath.Join(string(d), "upper")
-}
-
-func (d OverlayDir) WorkDir() string {
-	return filepath.Join(string(d), "work")
-}
-
-func (d OverlayDir) PrivateDir() string {
-	return filepath.Join(string(d), "private")
-}
-
-func (d OverlayDir) MountDir() string {
-	return filepath.Join(string(d), "mount")
-}
-
-type IODir string
-
-func (d IODir) TTYOutFifo() string {
-	return filepath.Join(string(d), "out")
-}
-
-func (d IODir) TTYInFifo() string {
-	return filepath.Join(string(d), "in")
 }
 
 type Attachable interface {
@@ -430,7 +440,6 @@ type Container interface {
 	Attachable
 	Wait(context.Context) WaitResult
 	Destroy(time.Duration) error
-	DiffDirs() map[string]string
 }
 
 type ContainerProc struct {
@@ -445,8 +454,12 @@ type ContainerProc struct {
 type ContainerDef struct {
 	ContainerProc
 	MountBackend
-	Hostname string
-	Mounts   Mounts
+	Hostname       string
+	Mounts         Mounts
+	UpperDir       string
+	WorkDir        string
+	Persist        bool
+	ReadOnlyRootfs bool
 }
 
 type CleanupStack []func() error
@@ -468,7 +481,6 @@ type container struct {
 	initProc        libcontainer.Process
 	runcCtr         libcontainer.Container
 	mounts          []oci.Mount
-	diffDirs        map[string]string
 	consoleResizeCh chan<- console.WinSize
 
 	prekillCleanup  CleanupStack
@@ -477,10 +489,6 @@ type container struct {
 	waitOnce   sync.Once
 	waitCh     chan struct{}
 	waitResult WaitResult
-}
-
-func (c *container) DiffDirs() map[string]string {
-	return c.diffDirs
 }
 
 func (c *container) Destroy(waitTimeout time.Duration) (rerr error) {
@@ -555,16 +563,12 @@ func (c *container) Resize(winSize console.WinSize) {
 	c.consoleResizeCh <- winSize
 }
 
-func AttachConsole(ctx context.Context, attacher Attachable) error {
-	stdinConsole, err := console.ConsoleFromFile(os.Stdin)
+func AttachSelfConsole(ctx context.Context, attacher Attachable) error {
+	resizeCh, cleanup, err := SetupSelfConsole(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to open stdin as tty: %w", err)
+		return err
 	}
-	err = stdinConsole.SetRaw()
-	if err != nil {
-		return fmt.Errorf("failed to set stdin tty as raw: %w", err)
-	}
-	defer stdinConsole.Reset()
+	defer cleanup()
 
 	attachCh := make(chan error)
 	go func() {
@@ -572,22 +576,47 @@ func AttachConsole(ctx context.Context, attacher Attachable) error {
 		attachCh <- attacher.Attach(ctx, os.Stdin, os.Stdout)
 	}()
 
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, syscall.SIGWINCH)
-
 	for {
 		select {
 		case err := <-attachCh:
 			return err
-		case <-sigchan:
-			newSize, err := stdinConsole.Size()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to get tty size after SIGWINCH: %v\n", err)
-			} else {
-				attacher.Resize(newSize)
-			}
+		case winSize := <-resizeCh:
+			attacher.Resize(winSize)
 		}
 	}
+}
+
+func SetupSelfConsole(ctx context.Context) (<-chan console.WinSize, func(), error) {
+	stdinConsole, err := console.ConsoleFromFile(os.Stdin)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open stdin as tty: %w", err)
+	}
+	err = stdinConsole.SetRaw()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to set stdin tty as raw: %w", err)
+	}
+
+	sigchan := make(chan os.Signal, 1)
+	signal.Notify(sigchan, syscall.SIGWINCH)
+
+	resizeCh := make(chan console.WinSize)
+	go func() {
+		defer close(resizeCh)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sigchan:
+				newSize, err := stdinConsole.Size()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "failed to get tty size after SIGWINCH: %v\n", err)
+				} else {
+					resizeCh <- newSize
+				}
+			}
+		}
+	}()
+	return resizeCh, func() { stdinConsole.Reset() }, nil
 }
 
 func (c *container) Wait(ctx context.Context) WaitResult {
@@ -803,7 +832,6 @@ func DefaultMounts() Mounts {
 			Mode:     os.FileMode(01777),
 			ByteSize: uint(1024 * 1024 * 1024),
 			GenericMountOptions: GenericMountOptions{
-				Noexec: true,
 				Nosuid: true,
 				Nodev:  true,
 			},
@@ -813,7 +841,6 @@ func DefaultMounts() Mounts {
 			Mode:     os.FileMode(01777),
 			ByteSize: uint(262144 * 1024),
 			GenericMountOptions: GenericMountOptions{
-				Noexec: true,
 				Nosuid: true,
 				Nodev:  true,
 			},
@@ -834,6 +861,14 @@ func HasRBind(mountOptions []string) bool {
 	return hasOpt("rbind", mountOptions)
 }
 
+func HasAnyBind(mountOptions []string) bool {
+	return HasBind(mountOptions) || HasRBind(mountOptions)
+}
+
+func HasReadOnly(mountOptions []string) bool {
+	return hasOpt("ro", mountOptions)
+}
+
 func hasOpt(sought string, mountOptions []string) bool {
 	for _, opt := range mountOptions {
 		if opt == sought {
@@ -843,9 +878,9 @@ func hasOpt(sought string, mountOptions []string) bool {
 	return false
 }
 
-func ReplaceOption(m oci.Mount, oldOpt string, newOpt string) oci.Mount {
+func ReplaceOption(options []string, oldOpt string, newOpt string) []string {
 	var newOpts []string
-	for _, o := range m.Options {
+	for _, o := range options {
 		if o == oldOpt {
 			if newOpt != "" {
 				newOpts = append(newOpts, newOpt)
@@ -854,12 +889,7 @@ func ReplaceOption(m oci.Mount, oldOpt string, newOpt string) oci.Mount {
 			newOpts = append(newOpts, o)
 		}
 	}
-	return oci.Mount{
-		Source:      m.Source,
-		Destination: m.Destination,
-		Type:        m.Type,
-		Options:     newOpts,
-	}
+	return newOpts
 }
 
 func extractLowerDirs(options []string) []string {

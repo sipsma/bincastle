@@ -1,0 +1,456 @@
+package buildkit
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/moby/buildkit/cache"
+	"github.com/moby/buildkit/cache/metadata"
+	"github.com/moby/buildkit/client/llb"
+	"github.com/moby/buildkit/executor"
+	"github.com/moby/buildkit/frontend"
+	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/worker"
+	bolt "go.etcd.io/bbolt"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/sipsma/bincastle-distro/src"
+	"github.com/sipsma/bincastle/ctr"
+	"github.com/sipsma/bincastle/graph"
+	. "github.com/sipsma/bincastle/graph"
+	"github.com/sipsma/bincastle/util"
+)
+
+const (
+	KeyGitURL      = "git-url"
+	KeyGitRef      = "git-ref"
+	KeyLocalDir    = "local-dir"
+	KeySubdir      = "subdir"
+	KeySourcerName = "sourcer-name"
+	KeyRunType     = "runtype"
+)
+
+const (
+	defaultGitRef         = "master"
+	defaultSourceImageRef = "docker.io/eriksipsma/golang-singleuser:latest"
+)
+
+type DefinitionSourcer interface {
+	DefinitionSource(llbsrc AsSpec, cmdPath string) (*Graph, *executor.Meta, error)
+}
+
+var definitionSourcers = map[string]DefinitionSourcer{
+	// only option right now is golang-based definitions
+	"": golangDefinitionSourcer{},
+}
+
+type golangDefinitionSourcer struct{}
+
+func (s golangDefinitionSourcer) DefinitionSource(llbsrc AsSpec, cmdPath string) (*Graph, *executor.Meta, error) {
+	return Build(LayerSpec(
+			Dep(LayerSpec(
+				Dep(Image{Ref: "docker.io/eriksipsma/golang-singleuser:latest"}),
+				Shell(
+					`/sbin/apk add build-base git`,
+				), // TODO update the image with these?
+			)),
+			BuildDep(Wrap(llbsrc, MountDir("/llbsrc"))),
+			Env("PATH", "/bin:/sbin:/usr/bin:/usr/local/go/bin:/go/bin"),
+			Env("GO111MODULE", "on"),
+			Env("GOPATH", "/build"),
+			ScratchMount(`/build`),
+			Shell(
+				fmt.Sprintf(`cd %s`, filepath.Join(`/llbsrc`, cmdPath)),
+				// TODO better way of getting static bin?
+				`go build -a -tags "netgo osusergo" -ldflags '-w -extldflags "-static"' -o /llbgen .`,
+			),
+			AlwaysRun(true),
+		)), &executor.Meta{
+			Args:           []string{"/llbgen"},
+			Cwd:            "/",
+			ReadonlyRootFS: true,
+		}, nil
+}
+
+type args struct {
+	GitURL       string
+	GitRef       string
+	LocalDir     string
+	Subdir       string
+	Sourcer      DefinitionSourcer
+	RunType      RunType
+	CacheImports []frontend.CacheOptionsEntry
+}
+
+// TODO this is pretty dumb, it should be removed once there's an official merge-op (which
+// will allow the frontend to just consistently return a merge-op as its only result instead
+// of choosing what to do based on which RunType is provided)
+type RunType string
+
+const (
+	Exec        RunType = "exec"
+	LocalExport RunType = "local-export"
+	ImageExport RunType = "image-export"
+	CacheExport RunType = "cache-export"
+)
+
+func getargs(opts map[string]string) (*args, error) {
+	a := args{
+		GitURL:   opts[KeyGitURL],
+		GitRef:   opts[KeyGitRef],
+		LocalDir: opts[KeyLocalDir],
+		Subdir:   opts[KeySubdir],
+		RunType:  RunType(opts[KeyRunType]),
+	}
+	if sourcer, ok := definitionSourcers[opts[KeySourcerName]]; !ok {
+		return nil, fmt.Errorf("unknown definition sourcer %q", opts[KeySourcerName])
+	} else {
+		a.Sourcer = sourcer
+	}
+
+	if a.GitURL != "" && a.LocalDir != "" {
+		return nil, fmt.Errorf("cannot set both %s (%q) and %s (%q)",
+			KeyGitURL, a.GitURL, KeyLocalDir, a.LocalDir)
+	}
+
+	if a.GitURL == "" && a.LocalDir == "" {
+		return nil, fmt.Errorf("one of %s and %s must be set",
+			KeyGitURL, KeyLocalDir)
+	}
+
+	if a.GitURL != "" && a.GitRef == "" {
+		a.GitRef = defaultGitRef
+	}
+
+	if a.RunType == "" {
+		a.RunType = Exec
+	}
+
+	if cacheImportReg := opts["cache-from"]; cacheImportReg != "" {
+		a.CacheImports = append(a.CacheImports, frontend.CacheOptionsEntry{
+			Type: "registry",
+			Attrs: map[string]string{
+				"ref": cacheImportReg,
+			},
+		})
+	}
+
+	return &a, nil
+}
+
+// TODO would be nice for this to eventually be implemented via Gateway, but need
+// way to do the careful management of mutable refs required for persistence of exec state
+type BincastleFrontend struct {
+	cacheManager  cache.Manager
+	metadataStore *metadata.Store
+}
+
+func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBridge, opt map[string]string, inputs map[string]*pb.Definition, sid string) (*frontend.Result, error) {
+	a, err := getargs(opt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse frontend args: %w", err)
+	}
+
+	var llbsrc AsSpec
+	if a.GitURL != "" {
+		llbsrc = src.ViaGit{
+			URL:       a.GitURL,
+			Ref:       a.GitRef,
+			Name:      "llb",
+			AlwaysRun: true,
+		}
+	}
+	if a.LocalDir != "" {
+		llbsrc = Local{Path: a.LocalDir}
+	}
+
+	definitionSourceGraph, meta, err := a.Sourcer.DefinitionSource(llbsrc, a.Subdir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get definition source graph: %w", err)
+	}
+
+	// TODO this is really, really dumb
+	marshalLayers, err := definitionSourceGraph.MarshalLayers(ctx, llb.LinuxAmd64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal definition source graph: %w", err)
+	}
+	var sourceDef pb.Definition
+	if err := (&sourceDef).Unmarshal(marshalLayers[len(marshalLayers)-1].LLB); err != nil {
+		return nil, fmt.Errorf("failed to get definition source: %w")
+	}
+
+	res, err := llbBridge.Solve(ctx, frontend.SolveRequest{
+		Definition:   &sourceDef,
+		CacheImports: a.CacheImports,
+	}, sid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to solve definition source: %w", err)
+	}
+	// TODO release refs earlier?
+	defer func() {
+		res.EachRef(func(ref solver.ResultProxy) error {
+			return ref.Release(context.TODO())
+		})
+	}()
+
+	if res.Ref == nil {
+		return nil, fmt.Errorf("definition source result is missing ref")
+	}
+	r, err := res.Ref.Result(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get definition source ref result: %w", err)
+	}
+	// NOTE: if you want to support export in the future, it seems like you might
+	// be able to use r.CacheKeys()? Not sure though
+	workerRef, ok := r.Sys().(*worker.WorkerRef)
+	if !ok {
+		return nil, fmt.Errorf("definition source returned invalid ref type: %T", r.Sys())
+	}
+
+	rootfs := workerRef.ImmutableRef // TODO ever need to support mutable rootfs in the future?
+
+	process := executor.ProcessInfo{}
+	if meta != nil {
+		process.Meta = *meta
+	} else {
+		return nil, fmt.Errorf("invalid empty meta for definition source")
+	}
+
+	type output struct {
+		bytes []byte
+		err   error
+	}
+
+	outRead, outWrite := io.Pipe()
+	process.Stdout = outWrite
+	outputCh := make(chan output)
+	go func() {
+		bytes, err := ioutil.ReadAll(outRead)
+		outputCh <- output{bytes: bytes, err: err}
+		close(outputCh)
+	}()
+
+	id := "" // use a random unique id to obtain the definition
+	defSourceMounts := []executor.Mount{{
+		Src:      workerRef.ImmutableRef,
+		Dest:     util.LowerDir{Dest: "/"}.String(),
+		Readonly: true,
+	}}
+	var started chan struct{}
+	if err := llbBridge.Run(ctx, id, rootfs, defSourceMounts, process, started); err != nil {
+		// TODO include output from process for debugging?
+		return nil, fmt.Errorf("failed to run definition source: %w", err)
+	}
+	outWrite.Close()
+
+	var layers []graph.MarshalLayer
+	select {
+	case out := <-outputCh:
+		if out.err != nil {
+			return nil, fmt.Errorf("error reading definition from source's stdout: %w", err)
+		}
+		layers, err = graph.UnmarshalLayers(out.bytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal definition source output: %w", err)
+		}
+	case <-time.After(5 * time.Second):
+		// the process is already dead, so 5 seconds is the timeout waiting to read its
+		// output in full (extremely generous amount of time)
+		return nil, fmt.Errorf("timed out reading definition")
+	}
+	outRead.Close()
+
+	if len(layers) == 0 {
+		return nil, nil
+	}
+
+	if a.RunType == LocalExport || a.RunType == ImageExport {
+		// presume the top layer is the one we want to export
+		var def pb.Definition
+		if err := (&def).Unmarshal(layers[len(layers)-1].LLB); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal layer: %w", err)
+		}
+		return llbBridge.Solve(ctx, frontend.SolveRequest{
+			Definition:   &def,
+			CacheImports: a.CacheImports,
+		}, sid)
+	} else if a.RunType == CacheExport {
+		// We want to export the whole graph, but individually exporting each layer
+		// doesn't really work how we want, so make a silly fake top level dep that
+		// doesn't do anything and export the cache for it.
+		// TODO This will (thankfully!) not be needed once there's a real merge-op.
+		runOpts := []llb.RunOption{
+			llb.Args([]string{"/bin/true"}),
+			llb.AddMount(util.LowerDir{
+				Dest: "/",
+			}.String(), llb.Image("docker.io/eriksipsma/golang-singleuser:latest"), llb.Readonly),
+		}
+		for i, layer := range layers {
+			var def pb.Definition
+			if err := (&def).Unmarshal(layer.LLB); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal layer: %w", err)
+			}
+			llbDef, err := llb.NewDefinitionOp(&def)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create definition op: %w", err)
+			}
+
+			runOpts = append(runOpts, llb.AddMount(util.LowerDir{
+				Index: i + 1,
+				Dest:  "/foo",
+			}.String(), llb.NewState(llbDef.Output()), llb.Readonly))
+		}
+		llbDef, err := llb.Scratch().Run(runOpts...).Root().Marshal(ctx, llb.LinuxAmd64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal exec state for remote cache export: %w", err)
+		}
+		return llbBridge.Solve(ctx, frontend.SolveRequest{
+			Definition:   llbDef.ToPB(),
+			CacheImports: a.CacheImports,
+		}, sid)
+	}
+
+	// a.RunType == Exec
+
+	eg, egctx := errgroup.WithContext(ctx)
+	mounts := make([]executor.Mount, len(layers))
+	results := make([]*frontend.Result, len(layers))
+	for _i, _layer := range layers {
+		// have to copy loop vars to avoid races
+		i := _i
+		layer := _layer
+		eg.Go(func() error {
+			var def pb.Definition
+			if err := (&def).Unmarshal(layer.LLB); err != nil {
+				return err
+			}
+
+			result, err := llbBridge.Solve(egctx, frontend.SolveRequest{
+				Definition: &def,
+				CacheImports: a.CacheImports,
+			}, sid)
+			if err != nil {
+				return err
+			}
+			results[i] = result
+
+			if result.Ref == nil {
+				return fmt.Errorf("missing ref for result of op") // TODO useless error msg
+			}
+			r, err := result.Ref.Result(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to get ref result: %w", err)
+			}
+			workerRef, ok := r.Sys().(*worker.WorkerRef)
+			if !ok {
+				return fmt.Errorf("invalid ref type: %T", r.Sys())
+			}
+
+			mounts[i] = executor.Mount{
+				Src:      workerRef.ImmutableRef,
+				Selector: layer.OutputDir,
+				Dest: util.LowerDir{
+					Index: i,
+					Dest:  layer.MountDir,
+				}.String(),
+			}
+			return nil
+		})
+	}
+	defer func() {
+		for _, result := range results {
+			if result != nil {
+				result.EachRef(func(ref solver.ResultProxy) error {
+					return ref.Release(context.TODO())
+				})
+			}
+		}
+	}()
+
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+
+	// TODO don't hardcode
+	execName := "home"
+	const execKey = "bincastle.ExecName"
+	index := "bincastle-exec:" + execName
+	items, err := f.metadataStore.Search(index)
+	if err != nil {
+		return nil, fmt.Errorf("error during search for exec %s: %w", execName, err)
+	}
+
+	var execRef cache.MutableRef
+	if len(items) > 0 {
+		ref, err := f.cacheManager.GetMutable(ctx, items[0].ID())
+		if err != nil {
+			return nil, fmt.Errorf("failed to get mutable ref for exec %s: %w", execName, err)
+		}
+		defer ref.Release(context.TODO())
+		execRef = ref
+	} else {
+		ref, err := f.cacheManager.New(ctx, nil, cache.CachePolicyRetain)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create new ref for exec %s: %w", execName, err)
+		}
+		defer ref.Release(context.TODO())
+
+		// TODO ensure that the ref gets deleted if there's an error before the bincastle-exec index is set?
+		v, err := metadata.NewValue(execName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create new metadata value for exec %s: %w", execName, err)
+		}
+		v.Index = index
+		si := ref.Metadata()
+		if err := si.Update(func(b *bolt.Bucket) error {
+			return si.SetValue(b, execKey, v)
+		}); err != nil {
+			return nil, fmt.Errorf("failed to update ref with exec name index %s: %w", execName, err)
+		}
+
+		if immutable, err := ref.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("failed to commit new mutable ref for exec %s: %w", execName, err)
+		} else if err := immutable.Release(ctx); err != nil {
+			return nil, fmt.Errorf("failed to release immutable ref for exec %s: %w", execName, err)
+		}
+		execRef = ref
+	}
+
+	resizeCh, consoleCleanup, err := ctr.SetupSelfConsole(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup console for exec %s: %w", execName, err)
+	}
+	defer consoleCleanup()
+	execResizeCh := make(chan executor.WinSize)
+	go func() {
+		for winSize := range resizeCh {
+			execResizeCh <- executor.WinSize{
+				Rows: uint32(winSize.Height),
+				Cols: uint32(winSize.Width),
+			}
+		}
+	}()
+
+	execProcess := executor.ProcessInfo{
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Resize: execResizeCh,
+		// TODO Don't hardcode; add way of configuring defaults in graph def and overrides from cmdline
+		Meta: executor.Meta{
+			Args: []string{"/bin/sh", "-l"},
+			Cwd:  "/",
+		},
+	}
+
+	if err := llbBridge.Run(ctx, ExecNameToID(execName), execRef, mounts, execProcess, nil); err != nil {
+		// TODO include output from process for debugging?
+		return nil, fmt.Errorf("failed to run bincastle exec %s: %w", execName, err)
+	}
+	return &frontend.Result{}, nil
+}
