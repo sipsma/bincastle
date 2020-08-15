@@ -76,8 +76,8 @@ ff02::2 ip6-allrouters
 
 const (
 	// TODO don't hardcode
-	Root = "/var/lib/buildkitd"
-	socket = "/var/buildkitd.sock"
+	Root   = "/var/lib/buildkitd"
+	socket = "/var/bincastle.sock"
 )
 
 var (
@@ -104,11 +104,11 @@ type BincastleArgs struct {
 	ExportImageRef   string
 	SSHAgentSockPath string
 
-	BuildkitdSockPath string
+	BincastleSockPath string
 }
 
 func BincastleBuild(ctx context.Context, args BincastleArgs) error {
-	c, err := client.New(ctx, fmt.Sprintf(`unix://%s`, args.BuildkitdSockPath))
+	c, err := client.New(ctx, fmt.Sprintf(`unix://%s`, args.BincastleSockPath))
 	if err != nil {
 		return errors.Wrapf(err, "failed to create client")
 	}
@@ -311,10 +311,7 @@ func newController(mountBackend ctr.MountBackend) (*control.Controller, func() e
 	}
 
 	frontends := map[string]frontend.Frontend{
-		"bincastle": BincastleFrontend{
-			cacheManager:  workerBackend.CacheManager,
-			metadataStore: workerBackend.MetadataStore,
-		},
+		"bincastle": newBincastleFrontend(workerBackend.CacheManager, workerBackend.MetadataStore),
 	}
 
 	remoteCacheExporterFuncs := map[string]remotecache.ResolveCacheExporterFunc{
@@ -610,7 +607,7 @@ func (e *runcExecutor) Run(
 	root cache.Mountable,
 	execMounts []executor.Mount,
 	process executor.ProcessInfo,
-	_ chan<- struct{}, // started is ignored for now
+	started chan<- struct{},
 ) (rerr error) {
 	meta := process.Meta
 	stdin := process.Stdin
@@ -719,6 +716,13 @@ func (e *runcExecutor) Run(
 		}
 	}
 
+	// have to dereference /proc/self/exe now before specifying it as a mount,
+	// otherwise /proc/self/exe will end up refering to the fuse-overlayfs binary
+	selfBin, err := os.Readlink("/proc/self/exe")
+	if err != nil {
+		return err
+	}
+
 	ctrMounts = ctrMounts.With(ctr.DefaultMounts()...).With(
 		ctr.BindMount{
 			Dest:     "/etc/resolv.conf",
@@ -732,7 +736,7 @@ func (e *runcExecutor) Run(
 		},
 		ctr.BindMount{
 			Dest:     "/self",
-			Source:   "/proc/self/exe",
+			Source:   selfBin,
 			Readonly: true,
 		},
 		ctr.BindMount{
@@ -743,7 +747,13 @@ func (e *runcExecutor) Run(
 			Dest:   "/dev/fuse",
 			Source: "/dev/fuse",
 		},
+		ctr.BindMount{
+			Dest: "/bincastle.sock",
+			Source: socket,
+		},
 	)
+
+	meta.Env = append(meta.Env, "BINCASTLE_SOCK=/bincastle.sock")
 
 	if sshAgentSock := os.Getenv("SSH_AUTH_SOCK"); sshAgentSock != "" {
 		ctrMounts = ctrMounts.With(ctr.BindMount{
@@ -770,6 +780,9 @@ func (e *runcExecutor) Run(
 	})
 	if err != nil {
 		return err
+	}
+	if started != nil {
+		close(started)
 	}
 
 	go func() {

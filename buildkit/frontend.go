@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/moby/buildkit/cache"
@@ -149,14 +150,138 @@ func getargs(opts map[string]string) (*args, error) {
 type BincastleFrontend struct {
 	cacheManager  cache.Manager
 	metadataStore *metadata.Store
+
+	startOnce  sync.Once
+	newSolveCh chan *solveReq
 }
 
-func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBridge, opt map[string]string, inputs map[string]*pb.Definition, sid string) (*frontend.Result, error) {
+type solveReq struct {
+	args     *args
+	layers   []graph.MarshalLayer
+	mounts   []executor.Mount
+	resultCh chan<- *solveResult
+
+	cleanupOnce sync.Once
+	cleanupFunc  func()
+}
+
+func (r *solveReq) cleanup() {
+	if r.cleanupFunc != nil {
+		r.cleanupOnce.Do(r.cleanupFunc)
+	}
+}
+
+type solveResult struct {
+	*frontend.Result
+	err error
+}
+
+func newBincastleFrontend(cacheManager cache.Manager, metadataStore *metadata.Store) *BincastleFrontend {
+	return &BincastleFrontend{
+		cacheManager:  cacheManager,
+		metadataStore: metadataStore,
+	}
+}
+
+func (f *BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBridge, opt map[string]string, inputs map[string]*pb.Definition, sid string) (*frontend.Result, error) {
+	// For now, the first call to Solve is expected to be the one from
+	// an "outside" client, subsequent are from inside execs. TODO this
+	// won't apply when multiple "outside" clients are supported in future.
+	f.startOnce.Do(func() {
+		f.newSolveCh = make(chan *solveReq, 1)
+		go func() {
+			var origReq *solveReq
+			var curExecReq *solveReq
+			var prevExecReq *solveReq
+			for req := range f.newSolveCh {
+				if origReq == nil {
+					origReq = req
+				}
+
+				if prevExecReq != nil {
+					prevExecReq.cleanup()
+				}
+				prevExecReq = curExecReq
+
+				solveCtx, solveCancel := context.WithCancel(ctx)
+				done := make(chan *solveResult)
+				switch req.args.RunType {
+				case LocalExport, ImageExport:
+					curExecReq = nil
+					go func() {
+						defer close(done)
+						res, err := f.topLayerSolve(solveCtx, llbBridge, req.args, sid, req.layers)
+						done <- &solveResult{Result: res, err: err}
+					}()
+				case CacheExport:
+					curExecReq = nil
+					go func() {
+						defer close(done)
+						res, err := f.allLayerSolve(solveCtx, llbBridge, req.args, sid, req.layers)
+						done <- &solveResult{Result: res, err: err}
+					}()
+				case Exec:
+					curExecReq = req
+					go func() {
+						defer close(done)
+						err := f.exec(solveCtx, llbBridge, req.args, sid, req.mounts, nil)
+						done <- &solveResult{Result: &frontend.Result{}, err: err}
+					}()
+				}
+				select {
+				case res := <-done:
+					solveCancel()
+					req.cleanup()
+					if prevExecReq != nil {
+						prevExecReq.resultCh = origReq.resultCh
+						select {
+						case f.newSolveCh <- prevExecReq:
+							prevExecReq = nil
+							curExecReq = nil
+						default:
+						}
+					}
+					req.resultCh <- res
+				case newReq := <-f.newSolveCh:
+					solveCancel()
+					res := <-done // TODO timeout
+					if curExecReq == nil {
+						req.cleanup()
+					}
+					if !(req.args.RunType == Exec && req.resultCh == origReq.resultCh) {
+						req.resultCh <- res
+					}
+					select {
+					case f.newSolveCh <- newReq:
+					default:
+						// another request came along in the meantime; go with that instead
+						newReq.cleanup()
+						newReq.resultCh <- &solveResult{err: context.Canceled} // TODO use custom error
+					}
+				}
+			}
+		}()
+	})
+
 	a, err := getargs(opt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse frontend args: %w", err)
 	}
 
+	layers, mounts, cleanup, err := f.getLayers(ctx, llbBridge, a, sid)
+	if err != nil {
+		return nil, err
+	}
+
+	resultCh := make(chan *solveResult, 1)
+	f.newSolveCh <- &solveReq{args: a, layers: layers, mounts: mounts, cleanupFunc: cleanup, resultCh: resultCh}
+	result := <-resultCh
+	return result.Result, result.err
+}
+
+func (f *BincastleFrontend) getLayers(
+	ctx context.Context, llbBridge frontend.FrontendLLBBridge, a *args, sid string,
+) ([]graph.MarshalLayer, []executor.Mount, func(), error) {
 	var llbsrc AsSpec
 	if a.GitURL != "" {
 		llbsrc = src.ViaGit{
@@ -172,17 +297,17 @@ func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 
 	definitionSourceGraph, meta, err := a.Sourcer.DefinitionSource(llbsrc, a.Subdir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get definition source graph: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to get definition source graph: %w", err)
 	}
 
 	// TODO this is really, really dumb
 	marshalLayers, err := definitionSourceGraph.MarshalLayers(ctx, llb.LinuxAmd64)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal definition source graph: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to marshal definition source graph: %w", err)
 	}
 	var sourceDef pb.Definition
 	if err := (&sourceDef).Unmarshal(marshalLayers[len(marshalLayers)-1].LLB); err != nil {
-		return nil, fmt.Errorf("failed to get definition source: %w")
+		return nil, nil, nil, fmt.Errorf("failed to get definition source: %w")
 	}
 
 	res, err := llbBridge.Solve(ctx, frontend.SolveRequest{
@@ -190,7 +315,7 @@ func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 		CacheImports: a.CacheImports,
 	}, sid)
 	if err != nil {
-		return nil, fmt.Errorf("failed to solve definition source: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to solve definition source: %w", err)
 	}
 	// TODO release refs earlier?
 	defer func() {
@@ -200,17 +325,17 @@ func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 	}()
 
 	if res.Ref == nil {
-		return nil, fmt.Errorf("definition source result is missing ref")
+		return nil, nil, nil, fmt.Errorf("definition source result is missing ref")
 	}
 	r, err := res.Ref.Result(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get definition source ref result: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to get definition source ref result: %w", err)
 	}
 	// NOTE: if you want to support export in the future, it seems like you might
 	// be able to use r.CacheKeys()? Not sure though
 	workerRef, ok := r.Sys().(*worker.WorkerRef)
 	if !ok {
-		return nil, fmt.Errorf("definition source returned invalid ref type: %T", r.Sys())
+		return nil, nil, nil, fmt.Errorf("definition source returned invalid ref type: %T", r.Sys())
 	}
 
 	rootfs := workerRef.ImmutableRef // TODO ever need to support mutable rootfs in the future?
@@ -219,7 +344,7 @@ func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 	if meta != nil {
 		process.Meta = *meta
 	} else {
-		return nil, fmt.Errorf("invalid empty meta for definition source")
+		return nil, nil, nil, fmt.Errorf("invalid empty meta for definition source")
 	}
 
 	type output struct {
@@ -242,10 +367,15 @@ func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 		Dest:     util.LowerDir{Dest: "/"}.String(),
 		Readonly: true,
 	}}
-	var started chan struct{}
-	if err := llbBridge.Run(ctx, id, rootfs, defSourceMounts, process, started); err != nil {
+	if err := llbBridge.Run(ctx, id, rootfs, defSourceMounts, process, nil); err != nil {
 		// TODO include output from process for debugging?
-		return nil, fmt.Errorf("failed to run definition source: %w", err)
+
+		// TODO
+		outWrite.Close()
+		out := <-outputCh
+
+		// TODO
+		return nil, nil, nil, fmt.Errorf("failed to run definition source: %w\n%s", err, string(out.bytes))
 	}
 	outWrite.Close()
 
@@ -253,70 +383,22 @@ func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 	select {
 	case out := <-outputCh:
 		if out.err != nil {
-			return nil, fmt.Errorf("error reading definition from source's stdout: %w", err)
+			return nil, nil, nil, fmt.Errorf("error reading definition from source's stdout: %w", err)
 		}
 		layers, err = graph.UnmarshalLayers(out.bytes)
 		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal definition source output: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to unmarshal definition source output: %w", err)
 		}
 	case <-time.After(5 * time.Second):
 		// the process is already dead, so 5 seconds is the timeout waiting to read its
 		// output in full (extremely generous amount of time)
-		return nil, fmt.Errorf("timed out reading definition")
+		return nil, nil, nil, fmt.Errorf("timed out reading definition")
 	}
 	outRead.Close()
 
-	if len(layers) == 0 {
-		return nil, nil
+	if a.RunType != Exec {
+		return layers, nil, nil, nil
 	}
-
-	if a.RunType == LocalExport || a.RunType == ImageExport {
-		// presume the top layer is the one we want to export
-		var def pb.Definition
-		if err := (&def).Unmarshal(layers[len(layers)-1].LLB); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal layer: %w", err)
-		}
-		return llbBridge.Solve(ctx, frontend.SolveRequest{
-			Definition:   &def,
-			CacheImports: a.CacheImports,
-		}, sid)
-	} else if a.RunType == CacheExport {
-		// We want to export the whole graph, but individually exporting each layer
-		// doesn't really work how we want, so make a silly fake top level dep that
-		// doesn't do anything and export the cache for it.
-		// TODO This will (thankfully!) not be needed once there's a real merge-op.
-		runOpts := []llb.RunOption{
-			llb.Args([]string{"/bin/true"}),
-			llb.AddMount(util.LowerDir{
-				Dest: "/",
-			}.String(), llb.Image("docker.io/eriksipsma/golang-singleuser:latest"), llb.Readonly),
-		}
-		for i, layer := range layers {
-			var def pb.Definition
-			if err := (&def).Unmarshal(layer.LLB); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal layer: %w", err)
-			}
-			llbDef, err := llb.NewDefinitionOp(&def)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create definition op: %w", err)
-			}
-
-			runOpts = append(runOpts, llb.AddMount(util.LowerDir{
-				Index: i + 1,
-				Dest:  "/foo",
-			}.String(), llb.NewState(llbDef.Output()), llb.Readonly))
-		}
-		llbDef, err := llb.Scratch().Run(runOpts...).Root().Marshal(ctx, llb.LinuxAmd64)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal exec state for remote cache export: %w", err)
-		}
-		return llbBridge.Solve(ctx, frontend.SolveRequest{
-			Definition:   llbDef.ToPB(),
-			CacheImports: a.CacheImports,
-		}, sid)
-	}
-
-	// a.RunType == Exec
 
 	eg, egctx := errgroup.WithContext(ctx)
 	mounts := make([]executor.Mount, len(layers))
@@ -332,7 +414,7 @@ func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 			}
 
 			result, err := llbBridge.Solve(egctx, frontend.SolveRequest{
-				Definition: &def,
+				Definition:   &def,
 				CacheImports: a.CacheImports,
 			}, sid)
 			if err != nil {
@@ -363,7 +445,7 @@ func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 			return nil
 		})
 	}
-	defer func() {
+	cleanup := func() {
 		for _, result := range results {
 			if result != nil {
 				result.EachRef(func(ref solver.ResultProxy) error {
@@ -371,60 +453,120 @@ func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 				})
 			}
 		}
-	}()
-
-	if err := eg.Wait(); err != nil {
-		return nil, err
 	}
 
+	if err := eg.Wait(); err != nil {
+		cleanup()
+		return nil, nil, nil, err
+	}
+	return layers, mounts, cleanup, nil
+}
+
+func (f *BincastleFrontend) topLayerSolve(
+	ctx context.Context, llbBridge frontend.FrontendLLBBridge, a *args, sid string,
+	layers []graph.MarshalLayer,
+) (*frontend.Result, error) {
+	var def pb.Definition
+	if err := (&def).Unmarshal(layers[len(layers)-1].LLB); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal layer: %w", err)
+	}
+	return llbBridge.Solve(ctx, frontend.SolveRequest{
+		Definition:   &def,
+		CacheImports: a.CacheImports,
+	}, sid)
+}
+
+func (f *BincastleFrontend) allLayerSolve(
+	ctx context.Context, llbBridge frontend.FrontendLLBBridge, a *args, sid string,
+	layers []graph.MarshalLayer,
+) (*frontend.Result, error) {
+	// We want to export the whole graph, but individually exporting each layer
+	// doesn't really work how we want, so make a silly fake top level dep that
+	// doesn't do anything and export the cache for it.
+	// TODO This will (thankfully!) not be needed once there's a real merge-op.
+	runOpts := []llb.RunOption{
+		llb.Args([]string{"/bin/true"}),
+		llb.AddMount(util.LowerDir{
+			Dest: "/",
+		}.String(), llb.Image("docker.io/eriksipsma/golang-singleuser:latest"), llb.Readonly),
+	}
+	for i, layer := range layers {
+		var def pb.Definition
+		if err := (&def).Unmarshal(layer.LLB); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal layer: %w", err)
+		}
+		llbDef, err := llb.NewDefinitionOp(&def)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create definition op: %w", err)
+		}
+
+		runOpts = append(runOpts, llb.AddMount(util.LowerDir{
+			Index: i + 1,
+			Dest:  "/foo",
+		}.String(), llb.NewState(llbDef.Output()), llb.Readonly))
+	}
+	llbDef, err := llb.Scratch().Run(runOpts...).Root().Marshal(ctx, llb.LinuxAmd64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal exec state for remote cache export: %w", err)
+	}
+	return llbBridge.Solve(ctx, frontend.SolveRequest{
+		Definition:   llbDef.ToPB(),
+		CacheImports: a.CacheImports,
+	}, sid)
+}
+
+func (f *BincastleFrontend) exec(
+	ctx context.Context, llbBridge frontend.FrontendLLBBridge, a *args, sid string,
+	mounts []executor.Mount, started chan<- struct{},
+) error {
 	// TODO don't hardcode
 	execName := "home"
 	const execKey = "bincastle.ExecName"
 	index := "bincastle-exec:" + execName
 	items, err := f.metadataStore.Search(index)
 	if err != nil {
-		return nil, fmt.Errorf("error during search for exec %s: %w", execName, err)
+		return fmt.Errorf("error during search for exec %s: %w", execName, err)
 	}
 
 	var execRef cache.MutableRef
 	if len(items) > 0 {
 		ref, err := f.cacheManager.GetMutable(ctx, items[0].ID())
 		if err != nil {
-			return nil, fmt.Errorf("failed to get mutable ref for exec %s: %w", execName, err)
+			return fmt.Errorf("failed to get mutable ref for exec %s: %w", execName, err)
 		}
 		defer ref.Release(context.TODO())
 		execRef = ref
 	} else {
 		ref, err := f.cacheManager.New(ctx, nil, cache.CachePolicyRetain)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create new ref for exec %s: %w", execName, err)
+			return fmt.Errorf("failed to create new ref for exec %s: %w", execName, err)
 		}
 		defer ref.Release(context.TODO())
 
 		// TODO ensure that the ref gets deleted if there's an error before the bincastle-exec index is set?
 		v, err := metadata.NewValue(execName)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create new metadata value for exec %s: %w", execName, err)
+			return fmt.Errorf("failed to create new metadata value for exec %s: %w", execName, err)
 		}
 		v.Index = index
 		si := ref.Metadata()
 		if err := si.Update(func(b *bolt.Bucket) error {
 			return si.SetValue(b, execKey, v)
 		}); err != nil {
-			return nil, fmt.Errorf("failed to update ref with exec name index %s: %w", execName, err)
+			return fmt.Errorf("failed to update ref with exec name index %s: %w", execName, err)
 		}
 
 		if immutable, err := ref.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("failed to commit new mutable ref for exec %s: %w", execName, err)
+			return fmt.Errorf("failed to commit new mutable ref for exec %s: %w", execName, err)
 		} else if err := immutable.Release(ctx); err != nil {
-			return nil, fmt.Errorf("failed to release immutable ref for exec %s: %w", execName, err)
+			return fmt.Errorf("failed to release immutable ref for exec %s: %w", execName, err)
 		}
 		execRef = ref
 	}
 
 	resizeCh, consoleCleanup, err := ctr.SetupSelfConsole(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to setup console for exec %s: %w", execName, err)
+		return fmt.Errorf("failed to setup console for exec %s: %w", execName, err)
 	}
 	defer consoleCleanup()
 	execResizeCh := make(chan executor.WinSize)
@@ -448,9 +590,9 @@ func (f BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 		},
 	}
 
-	if err := llbBridge.Run(ctx, ExecNameToID(execName), execRef, mounts, execProcess, nil); err != nil {
+	if err := llbBridge.Run(ctx, ExecNameToID(execName), execRef, mounts, execProcess, started); err != nil {
 		// TODO include output from process for debugging?
-		return nil, fmt.Errorf("failed to run bincastle exec %s: %w", execName, err)
+		return fmt.Errorf("failed to run bincastle exec %s: %w", execName, err)
 	}
-	return &frontend.Result{}, nil
+	return nil
 }

@@ -494,12 +494,13 @@ type container struct {
 func (c *container) Destroy(waitTimeout time.Duration) (rerr error) {
 	rerr = multierror.Append(rerr, c.prekillCleanup.Cleanup()).ErrorOrNil()
 
-	for _, sig := range []os.Signal{syscall.SIGTERM, syscall.SIGKILL} {
-		err := c.runcCtr.Signal(sig, false)
-		if err != nil {
-			runcErr, ok := err.(libcontainer.Error)
-			if ok && runcErr.Code() == libcontainer.ContainerNotRunning {
-				break
+	for _, sigs := range [][]os.Signal{{syscall.SIGTERM, syscall.SIGHUP}, {syscall.SIGKILL}} {
+		for _, sig := range sigs {
+			if err := c.runcCtr.Signal(sig, false); err != nil {
+				runcErr, ok := err.(libcontainer.Error)
+				if ok && runcErr.Code() == libcontainer.ContainerNotRunning {
+					break
+				}
 			}
 		}
 
@@ -510,8 +511,7 @@ func (c *container) Destroy(waitTimeout time.Duration) (rerr error) {
 			break
 		}
 		// TODO real logging
-		fmt.Fprintf(os.Stderr, "timeout waiting for container shutdown after signal %q\n",
-			sig.String())
+		fmt.Fprintf(os.Stderr, "timeout waiting for container shutdown after signals %+v\n", sigs)
 	}
 
 	err := c.runcCtr.Destroy()

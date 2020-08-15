@@ -35,6 +35,7 @@ const (
 var (
 	homeDir      = os.Getenv("HOME")
 	sshAgentSock = os.Getenv("SSH_AUTH_SOCK")
+	bincastleSock = os.Getenv("BINCASTLE_SOCK")
 
 	exportImportFlags = []cli.Flag{
 		&cli.StringFlag{
@@ -112,20 +113,20 @@ func main() {
 
 					mounts := ctr.DefaultMounts().With(
 						ctr.BindMount{
-							Dest:     "/etc/resolv.conf",
-							Source:   "/etc/resolv.conf",
+							Dest:   "/etc/resolv.conf",
+							Source: "/etc/resolv.conf",
 						},
 						ctr.BindMount{
-							Dest:     "/etc/hosts",
-							Source:   "/etc/hosts",
+							Dest:   "/etc/hosts",
+							Source: "/etc/hosts",
 						},
 						ctr.BindMount{
 							Dest:   "/dev/fuse",
 							Source: "/dev/fuse",
 						},
 						ctr.BindMount{
-							Dest:     "/self",
-							Source:   selfBin,
+							Dest:   "/self",
+							Source: selfBin,
 							// NOTE: not setting this readonly because doing so can fail with
 							// EPERM when selfBin is not already mounted read-only. Later
 							// in the inner container it can be set to a read-only bind mount
@@ -149,12 +150,11 @@ func main() {
 					}
 
 					bcArgs := buildkit.BincastleArgs{
-						ImportCacheRef:   c.String("import-cache"),
-						ExportCacheRef:   c.String("export-cache"),
-						ExportImageRef:   c.String("export-image"),
-						SSHAgentSockPath: sshAgentSock,
-						// TODO don't hardcode
-						BuildkitdSockPath: "/home/sipsma/.bincastle/var/buildkitd.sock",
+						ImportCacheRef:    c.String("import-cache"),
+						ExportCacheRef:    c.String("export-cache"),
+						ExportImageRef:    c.String("export-image"),
+						SSHAgentSockPath:  sshAgentSock,
+						BincastleSockPath: bincastleSock,
 					}
 					if !strings.HasPrefix(c.Args().Get(0), "https://") && !strings.HasPrefix(c.Args().Get(0), "ssh://") {
 						bcArgs.SourceLocalDir = c.Args().Get(0)
@@ -182,26 +182,33 @@ func main() {
 					goCount := 3
 					errCh := make(chan error, goCount)
 
-					go func() {
-						defer cancel()
-						errCh <- runCtr(ctx, ctrState, ctr.ContainerDef{
-							ContainerProc: ctr.ContainerProc{
-								// don't use /proc/self/exe directly because it ends up being a
-								// memfd created by runc, which wreaks havoc later when inner containers
-								// need to mount /proc/self/exe to /self
-								Args:         append([]string{"/self", internalRunArg}, os.Args[2:]...),
-								Env:          env,
-								WorkingDir:   "/var",
-								Uid:          uint32(unix.Geteuid()),
-								Gid:          uint32(unix.Getegid()),
-								Capabilities: &ctr.AllCaps,
-							},
-							Hostname:       "bincastle",
-							Mounts:         mounts,
-							MountBackend:   ctr.NoOverlayfsBackend{},
-							ReadOnlyRootfs: true,
-						})
-					}()
+					if bcArgs.BincastleSockPath == "" {
+						// TODO
+						bcArgs.BincastleSockPath = "/home/sipsma/.bincastle/var/bincastle.sock"
+						go func() {
+							defer cancel()
+							errCh <- runCtr(ctx, ctrState, ctr.ContainerDef{
+								ContainerProc: ctr.ContainerProc{
+									// don't use /proc/self/exe directly because it ends up being a
+									// memfd created by runc, which wreaks havoc later when inner containers
+									// need to mount /proc/self/exe to /self
+									Args:         append([]string{"/self", internalRunArg}, os.Args[2:]...),
+									Env:          env,
+									WorkingDir:   "/var",
+									Uid:          uint32(unix.Geteuid()),
+									Gid:          uint32(unix.Getegid()),
+									Capabilities: &ctr.AllCaps,
+								},
+								Hostname:       "bincastle",
+								Mounts:         mounts,
+								MountBackend:   ctr.NoOverlayfsBackend{},
+								ReadOnlyRootfs: true,
+							})
+						}()
+					} else {
+						goCount--
+						needFuseOverlayfs = false
+					}
 
 					go func() {
 						defer cancel()
@@ -209,7 +216,7 @@ func main() {
 						timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 10*time.Second)
 						defer timeoutCancel()
 						// TODO don't hardcode
-						if err := waitToExist(timeoutCtx, "/home/sipsma/.bincastle/var/buildkitd.sock"); err != nil {
+						if err := waitToExist(timeoutCtx, bcArgs.BincastleSockPath); err != nil {
 							errCh <- err
 							return
 						}
@@ -224,10 +231,10 @@ func main() {
 							} else if err := buildkit.BincastleBuild(ctx, buildkit.BincastleArgs{
 								LLB:              fuseoverlayDef,
 								ExportLocalDir:   "/home/sipsma/.bincastle/var", // TODO don't hardcode
-								ImportCacheRef:   c.String("import-cache"),
-								SSHAgentSockPath: sshAgentSock,
+								ImportCacheRef:   bcArgs.ImportCacheRef,
+								SSHAgentSockPath: bcArgs.SSHAgentSockPath,
 								// TODO don't hardcode
-								BuildkitdSockPath: "/home/sipsma/.bincastle/var/buildkitd.sock",
+								BincastleSockPath: bcArgs.BincastleSockPath,
 							}); err != nil {
 								errCh <- err
 								return
