@@ -26,7 +26,6 @@ require (
 	github.com/creack/pty v1.1.10
 	github.com/gofrs/flock v0.7.1
 	github.com/hashicorp/go-multierror v1.0.0
-	github.com/justincormack/go-memfd v0.0.0-20170219213707-6e4af0518993
 	github.com/moby/buildkit v0.7.1-0.20200811165058-be534ae9a702
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.0.1
@@ -34,7 +33,7 @@ require (
 	github.com/opencontainers/runtime-spec v1.0.3-0.20200520003142-237cc4f519e2
 	github.com/opentracing/opentracing-go v1.2.0
 	github.com/pkg/errors v0.9.1
-	github.com/sipsma/bincastle-distro v0.0.0-20200810173308-96a985ef0a81
+	github.com/sipsma/bincastle-distro v0.0.0-20200822012639-f20e1658b141
 	github.com/stretchr/testify v1.5.1
 	github.com/urfave/cli v1.22.3
 	go.etcd.io/bbolt v1.3.5

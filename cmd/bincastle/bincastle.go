@@ -17,6 +17,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/sipsma/bincastle/buildkit"
 	"github.com/sipsma/bincastle/ctr"
+	"github.com/sipsma/bincastle/graph"
 	. "github.com/sipsma/bincastle/graph"
 	"github.com/urfave/cli"
 	"golang.org/x/sys/unix"
@@ -33,8 +34,8 @@ const (
 )
 
 var (
-	homeDir      = os.Getenv("HOME")
-	sshAgentSock = os.Getenv("SSH_AUTH_SOCK")
+	homeDir       = os.Getenv("HOME")
+	sshAgentSock  = os.Getenv("SSH_AUTH_SOCK")
 	bincastleSock = os.Getenv("BINCASTLE_SOCK")
 
 	exportImportFlags = []cli.Flag{
@@ -163,6 +164,12 @@ func main() {
 						bcArgs.SourceGitURL = c.Args().Get(0)
 						bcArgs.SourceGitRef = c.Args().Get(1)
 						bcArgs.SourceSubdir = c.Args().Get(2)
+					}
+
+					for _, kv := range os.Environ() {
+						if strings.HasPrefix(kv, graph.EnvOverridesPrefix) {
+							bcArgs.LocalOverrides = append(bcArgs.LocalOverrides, kv)
+						}
 					}
 
 					var needFuseOverlayfs bool

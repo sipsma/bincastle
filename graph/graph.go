@@ -5,8 +5,9 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
+	"path/filepath"
+	"encoding/json"
 
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/solver/llbsolver"
@@ -22,6 +23,7 @@ type Spec interface {
 }
 
 type Buildable interface {
+	Metadata
 	Deps() []AsSpec
 	Build([]*Graph) *Graph
 }
@@ -53,13 +55,18 @@ func (s BuildableSpec) With(opts ...SpecOpt) Spec {
 }
 
 type LayerSpecOpts struct {
-	BuildDeps []AsSpec
-	BaseState llb.State
-	ExecOpts  []llb.RunOption
+	BuildDeps     []AsSpec
+	BaseState     llb.State
+	BuildExecOpts []llb.RunOption
 
-	RunDeps   []AsSpec
-	MountDir  string
-	OutputDir string
+	RunDeps       []AsSpec
+	MountDir      string
+	OutputDir     string
+	RunArgs       []string
+	RunEnv        map[string]string
+	RunWorkingDir string
+
+	metadata map[interface{}]interface{}
 }
 
 func (ls *LayerSpecOpts) Deps() []AsSpec {
@@ -78,9 +85,14 @@ func (ls *LayerSpecOpts) Build(depGraphs []*Graph) *Graph {
 		outputDir: ls.OutputDir,
 	}
 
-	if len(ls.ExecOpts) > 0 {
-		execOpts := ls.ExecOpts
-		for i, dep := range tsort(mergeGraphs(buildDeps...)) {
+	if len(ls.BuildExecOpts) > 0 {
+		execOpts := ls.BuildExecOpts
+		mergedGraph := mergeGraphs(buildDeps...)
+		for _, kv := range mergedGraph.mergedEnv() {
+			execOpts = append(execOpts, llb.AddEnv(kv.key, kv.val))
+		}
+
+		for i, dep := range tsort(mergedGraph) {
 			execOpts = append(execOpts, llb.AddMount(util.LowerDir{
 				Index: i,
 				Dest:  dep.mountDir,
@@ -99,9 +111,32 @@ func (ls *LayerSpecOpts) Build(depGraphs []*Graph) *Graph {
 		}
 	}
 
+	layer.args = ls.RunArgs
+	layer.env = ls.RunEnv
+	layer.cwd = ls.RunWorkingDir
+	layer.metadata = ls.metadata
+
 	layer.Graph.roots = []*Layer{layer}
 	layer.digest = layer.calcDigest()
 	return &layer.Graph
+}
+
+func (ls LayerSpecOpts) Metadata(key interface{}) interface{} {
+	return ls.metadata[key]
+}
+
+func (ls *LayerSpecOpts) SetValue(key interface{}, value interface{}) {
+	if ls.metadata == nil {
+		ls.metadata = make(map[interface{}]interface{})
+	}
+	ls.metadata[key] = value
+}
+
+func (ls LayerSpecOpts) Apply(opts ...LayerSpecOpt) *LayerSpecOpts {
+	for _, opt := range opts {
+		ls = opt.ApplyToLayerSpecOpts(ls)
+	}
+	return &ls
 }
 
 type merge struct {
@@ -114,6 +149,10 @@ func (ms *merge) Deps() []AsSpec {
 
 func (ms *merge) Build(depGraphs []*Graph) *Graph {
 	return mergeGraphs(depGraphs...)
+}
+
+func (ms *merge) Metadata(interface{}) interface{} {
+	return nil
 }
 
 type wrap struct {
@@ -135,6 +174,10 @@ func (ws *wrap) Build(depGraphs []*Graph) *Graph {
 		depGraph = w.ApplyToGraph(depGraph)
 	}
 	return depGraph
+}
+
+func (ws *wrap) Metadata(interface{}) interface{} {
+	return nil
 }
 
 type replace struct {
@@ -188,6 +231,140 @@ func (r *replace) Build(depGraphs []*Graph) *Graph {
 		finalGraphs = append(finalGraphs, oldToNew[origRoot.digest])
 	}
 	return mergeGraphs(finalGraphs...)
+}
+
+func (r *replace) Metadata(interface{}) interface{} {
+	return nil
+}
+
+type overriddenDeps struct {
+	Buildable
+	deps []AsSpec
+}
+
+func (o *overriddenDeps) Deps() []AsSpec {
+	return o.deps
+}
+
+type override struct {
+	spec      AsSpec
+	overridee AsSpec
+	overrider AsSpec
+	cache     map[AsSpec]Spec
+}
+
+func (o *override) Deps() []AsSpec {
+	oldToNew := make(map[AsSpec]AsSpec)
+	if o.cache == nil {
+		o.cache = make(map[AsSpec]Spec)
+	}
+	bottomUpWalkSpecs(o.spec, o.cache, func(asSpec AsSpec) {
+		if asSpec == nil {
+			return
+		}
+		if asSpec == o.overridee {
+			oldToNew[asSpec] = o.overrider
+			return
+		}
+
+		spec := o.cache[asSpec]
+		if spec == nil {
+			spec = asSpec.Spec()
+			o.cache[asSpec] = spec
+		}
+
+		var newDeps []AsSpec
+		var changed bool
+		for _, dep := range spec.Deps() {
+			if newDep, ok := oldToNew[dep]; ok {
+				changed = true
+				newDeps = append(newDeps, newDep)
+			} else {
+				newDeps = append(newDeps, dep)
+			}
+		}
+
+		if changed {
+			oldToNew[asSpec] = BuildableSpec{&overriddenDeps{
+				Buildable: spec,
+				deps:      newDeps,
+			}}
+		}
+	})
+
+	if newSpec, ok := oldToNew[o.spec]; ok {
+		return newSpec.Spec().Deps()
+	}
+	return o.cache[o.spec].Deps()
+}
+
+func (o *override) Build(depGraphs []*Graph) *Graph {
+	return o.spec.Spec().Build(depGraphs)
+}
+
+func (o *override) Metadata(key interface{}) interface{} {
+	return o.spec.Spec().Metadata(key)
+}
+
+func walkSpecs(asSpec AsSpec, cache map[AsSpec]Spec, f func(AsSpec) error) error {
+	return walk([]interface{}{asSpec},
+		func(vtx interface{}) interface{} {
+			return vtx
+		},
+		func(vtx interface{}) []interface{} {
+			var deps []interface{}
+			if vtx == nil {
+				return deps
+			}
+			asSpec := vtx.(AsSpec)
+			spec := cache[asSpec]
+			if spec == nil {
+				spec = asSpec.Spec()
+				cache[asSpec] = spec
+			}
+			for _, dep := range spec.Deps() {
+				deps = append(deps, dep)
+			}
+			return deps
+		},
+		func(vtx interface{}) error {
+			if vtx == nil {
+				return f(nil)
+			}
+			return f(vtx.(AsSpec))
+		},
+	)
+}
+
+func bottomUpWalkSpecs(asSpec AsSpec, cache map[AsSpec]Spec, f func(AsSpec)) {
+	bottomUpWalk([]interface{}{asSpec},
+		func(vtx interface{}) interface{} {
+			return vtx
+		},
+		func(vtx interface{}) []interface{} {
+			var deps []interface{}
+			if vtx == nil {
+				return deps
+			}
+			asSpec := vtx.(AsSpec)
+			spec := cache[asSpec]
+			if spec == nil {
+				spec = asSpec.Spec()
+				cache[asSpec] = spec
+			}
+			for _, dep := range spec.Deps() {
+				deps = append(deps, dep)
+			}
+			return deps
+		},
+		func(vtx interface{}) {
+			if vtx == nil {
+				f(nil)
+				return
+			}
+			f(vtx.(AsSpec))
+		},
+	)
 }
 
 // TODO docs, creates a transitively reduced graph of layers from the specs,
@@ -277,11 +454,22 @@ func Build(asSpec AsSpec, opts ...SpecOpt) *Graph {
 
 type Layer struct {
 	Graph
+	deps  *Graph
+	index int // max number of hops to a layer with no deps (or 0 if this has no deps)
+
 	state     llb.State
 	mountDir  string
 	outputDir string
-	deps      *Graph
-	index     int // max number of hops to a layer with no deps (or 0 if this has no deps)
+	args []string
+	env  map[string]string
+	cwd  string
+
+	// metadata is not included in digest
+	metadata map[interface{}]interface{}
+}
+
+func (l Layer) Metadata(key interface{}) interface{} {
+	return l.metadata[key]
 }
 
 type Graph struct {
@@ -301,77 +489,74 @@ func (g graphSpec) Build(_ []*Graph) *Graph {
 	return g.Graph
 }
 
+func (g graphSpec) Metadata(interface{}) interface{} {
+	return nil
+}
+
 func (g *Graph) Spec() Spec {
 	return BuildableSpec{graphSpec{g}}
 }
 
-func (g *Graph) Exec(name string, opts ...LayerSpecOpt) *Graph {
-	return Build(LayerSpec(
-		Dep(g),
-		Env("BINCASTLE_INTERACTIVE", name),
-		AlwaysRun(true),
-		MergeLayerSpecOpts(opts...),
-	))
+type kvpair struct {
+	key string `json:"key"`
+	val string `json:"val"`
 }
 
-// TODO it would probably be better to just expose Walk and have this and similar
-// implementations exist outside Graph directly
-func (g *Graph) DumpDot(w io.Writer) error {
-	var layers []*Layer
-	g.walk(func(l *Layer) error {
-		layers = append(layers, l)
-		return nil
+func (kv kvpair) String() string {
+	return kv.key + "=" + kv.val
+}
+
+func (g *Graph) mergedEnv() []kvpair {
+	merged := make(map[string]int)
+	var kvs []kvpair
+	for _, l := range tsort(g) {
+		// TODO special handling for PATH?
+		for k, v := range l.env {
+			if index, ok := merged[k]; ok {
+				kvs[index] = kvpair{k, v}
+			} else {
+				merged[k] = len(kvs)
+				kvs = append(kvs, kvpair{k, v})
+			}
+		}
+	}
+	sort.Slice(kvs, func(i, j int) bool {
+		return kvs[i].key < kvs[j].key
 	})
-	fmt.Fprintln(w, "digraph {")
-	for _, l := range layers {
-		def, err := l.state.Marshal(context.TODO(), llb.LinuxAmd64)
-		if err != nil {
-			return err
-		}
-		pbDef := def.ToPB()
-		if len(pbDef.Def) != 0 {
-			edge, err := llbsolver.Load(def.ToPB())
-			if err != nil {
-				panic(err)
-			}
-			fmt.Fprintf(w, "  %q [label=%q shape=%q];\n", l.digest, edge.Vertex.Name(), "box")
-		}
-	}
-	for _, l := range layers {
-		if l.deps != nil {
-			for _, dep := range l.deps.roots {
-				fmt.Fprintf(w, "  %q -> %q [label=%q];\n", l.digest, dep.digest, dep.mountDir)
-			}
-		}
-	}
-	fmt.Fprintln(w, "}")
-	return nil
+	return kvs
 }
 
 func (g *Graph) calcDigest() digest.Digest {
 	// TODO is sha256 overkill? Maybe fnv or murmur?
 	hasher := sha256.New()
 
+	// TODO can't use MarshalLayer because LLB def used
+	// there is inconsistent (? double-check that) and
+	// it does silly things w/ the args and env. Should
+	// figure out way to use it though
+	type Marshal struct {
+		MountDir string
+		OutputDir string
+		Args []string
+		Env []kvpair
+		Cwd string
+		LLBDigest string
+		DepDigest string
+	}
+
 	if len(g.roots) == 1 {
 		l := g.roots[0]
 
-		_, err := hasher.Write([]byte(l.mountDir))
-		if err != nil {
-			panic(err)
+		m := Marshal{
+			MountDir: filepath.Clean(l.mountDir),
+			OutputDir: filepath.Clean(l.outputDir),
+			Args: l.args,
+			Env: l.mergedEnv(),
+			Cwd: filepath.Clean(l.cwd),
 		}
 
-		_, err = hasher.Write([]byte(l.outputDir))
-		if err != nil {
-			panic(err)
-		}
-
-		var depDgst string
 		if l.deps != nil {
-			depDgst = string(l.deps.digest)
-		}
-		_, err = hasher.Write([]byte(depDgst))
-		if err != nil {
-			panic(err)
+			m.DepDigest = string(l.deps.digest)
 		}
 
 		def, err := l.state.Marshal(context.TODO())
@@ -383,14 +568,21 @@ func (g *Graph) calcDigest() digest.Digest {
 		// consistent results
 		pbDef := def.ToPB()
 		if len(pbDef.Def) != 0 {
-			edge, err := llbsolver.Load(def.ToPB())
+			edge, err := llbsolver.Load(pbDef)
 			if err != nil {
 				panic(err)
 			}
-			_, err = hasher.Write([]byte(edge.Vertex.Digest().String()))
-			if err != nil {
-				panic(err)
-			}
+			m.LLBDigest = edge.Vertex.Digest().String()
+		}
+
+		marshalled, err := json.Marshal(m)
+		if err != nil {
+			panic(err)
+		}
+
+		_, err = hasher.Write(marshalled)
+		if err != nil {
+			panic(err)
 		}
 
 		return digest.NewDigestFromBytes(digest.SHA256, hasher.Sum(nil))
@@ -405,93 +597,54 @@ func (g *Graph) calcDigest() digest.Digest {
 	return digest.NewDigestFromBytes(digest.SHA256, hasher.Sum(nil))
 }
 
-var StopWalk = errors.New("stopping graph walk")
-var SkipLayer = errors.New("skipping deps of layer during graph walk")
-
-// breadth first walk, each layer is visited exactly once
 func (g *Graph) walk(f func(*Layer) error) error {
-	stack := [][]*Layer{g.roots}
-	cache := make(map[digest.Digest]struct{})
-	for len(stack) > 0 {
-		layers := stack[len(stack)-1]
-		if len(layers) == 0 {
-			stack = stack[:len(stack)-1]
-			continue
-		}
-		layer := layers[len(layers)-1]
-		stack[len(stack)-1] = stack[len(stack)-1][:len(layers)-1]
-		if _, ok := cache[layer.digest]; ok {
-			continue
-		}
-		cache[layer.digest] = struct{}{}
-		switch err := f(layer); err {
-		case StopWalk:
-			return nil
-		case SkipLayer:
-			continue
-		case nil:
-			if layer.deps != nil {
-				stack = append(stack, layer.deps.roots)
-			}
-		default:
-			return err
-		}
+	starts := make([]interface{}, len(g.roots))
+	for i, root := range g.roots {
+		starts[i] = root
 	}
-	return nil
+
+	return walk(starts,
+		func(vtx interface{}) interface{} {
+			return vtx.(*Layer).digest
+		},
+		func(vtx interface{}) []interface{} {
+			var deps []interface{}
+			if layerDeps := vtx.(*Layer).deps; layerDeps != nil {
+				for _, dep := range layerDeps.roots {
+					deps = append(deps, dep)
+				}
+			}
+			return deps
+		},
+		func(vtx interface{}) error {
+			return f(vtx.(*Layer))
+		},
+	)
 }
 
-// walks in reverse topological order, when a layer is visited all its deps will
-// have already been visited
 func (g *Graph) bottomUpWalk(f func(*Layer)) {
-	type walkState struct {
-		*Layer
-		pendingParents map[*walkState]struct{}
-		pendingDeps    map[*walkState]struct{}
+	starts := make([]interface{}, len(g.roots))
+	for i, root := range g.roots {
+		starts[i] = root
 	}
-	walkStates := make(map[*Layer]*walkState)
-	allDepsReady := make(map[*walkState]struct{})
-	g.walk(func(l *Layer) error {
-		ws, ok := walkStates[l]
-		if !ok {
-			ws = &walkState{
-				Layer:          l,
-				pendingParents: make(map[*walkState]struct{}),
-				pendingDeps:    make(map[*walkState]struct{}),
-			}
-			walkStates[l] = ws
-		}
-		if l.deps != nil {
-			for _, dep := range l.deps.roots {
-				depState, ok := walkStates[dep]
-				if !ok {
-					depState = &walkState{
-						Layer:          dep,
-						pendingParents: make(map[*walkState]struct{}),
-						pendingDeps:    make(map[*walkState]struct{}),
-					}
-					walkStates[dep] = depState
-				}
-				ws.pendingDeps[depState] = struct{}{}
-				depState.pendingParents[ws] = struct{}{}
-			}
-		} else {
-			allDepsReady[ws] = struct{}{}
-		}
-		return nil
-	})
-	for len(allDepsReady) > 0 {
-		newAllDepsReady := make(map[*walkState]struct{})
-		for ws := range allDepsReady {
-			f(ws.Layer)
-			for parent := range ws.pendingParents {
-				delete(parent.pendingDeps, ws)
-				if len(parent.pendingDeps) == 0 {
-					newAllDepsReady[parent] = struct{}{}
+
+	bottomUpWalk(starts,
+		func(vtx interface{}) interface{} {
+			return vtx.(*Layer).digest
+		},
+		func(vtx interface{}) []interface{} {
+			var deps []interface{}
+			if layerDeps := vtx.(*Layer).deps; layerDeps != nil {
+				for _, dep := range layerDeps.roots {
+					deps = append(deps, dep)
 				}
 			}
-		}
-		allDepsReady = newAllDepsReady
-	}
+			return deps
+		},
+		func(vtx interface{}) {
+			f(vtx.(*Layer))
+		},
+	)
 }
 
 func mergeGraphs(graphs ...*Graph) *Graph {
@@ -519,7 +672,7 @@ func mergeGraphs(graphs ...*Graph) *Graph {
 						delete(finalRootSet, l.digest)
 					}
 				}
-				return SkipLayer
+				return SkipDeps
 			}
 
 			finalClosure[l.digest] = l
@@ -565,4 +718,109 @@ func tsort(graph *Graph) []*Layer {
 		return il.digest < jl.digest
 	})
 	return layers
+}
+
+var StopWalk = errors.New("stopping walk")
+var SkipDeps = errors.New("skipping deps during walk")
+
+// breadth first walk, each layer is visited exactly once
+func walk(
+	starts []interface{},
+	getid func(interface{}) interface{},
+	getdeps func(interface{}) []interface{},
+	visit func(interface{}) error,
+) error {
+	stack := [][]interface{}{starts}
+	cache := make(map[interface{}]struct{})
+	for len(stack) > 0 {
+		curs := stack[len(stack)-1]
+		if len(curs) == 0 {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		cur := curs[len(curs)-1]
+		stack[len(stack)-1] = curs[:len(curs)-1]
+
+		id := getid(cur)
+		if _, ok := cache[id]; ok {
+			continue
+		}
+		cache[id] = struct{}{}
+
+		switch err := visit(cur); err {
+		case StopWalk:
+			return nil
+		case SkipDeps:
+			continue
+		case nil:
+			stack = append(stack, getdeps(cur))
+		default:
+			return err
+		}
+	}
+	return nil
+}
+
+// walks in reverse topological order, when a layer is visited all its deps
+// will have already been visited
+func bottomUpWalk(
+	starts []interface{},
+	getid func(interface{}) interface{},
+	getdeps func(interface{}) []interface{},
+	visit func(interface{}),
+) {
+	type walkState struct {
+		vtx            interface{}
+		pendingParents map[*walkState]struct{}
+		pendingDeps    map[*walkState]struct{}
+	}
+	walkStates := make(map[interface{}]*walkState)
+	allDepsReady := make(map[*walkState]struct{})
+
+	walk(starts, getid, getdeps, func(vtx interface{}) error {
+		id := getid(vtx)
+		ws, ok := walkStates[id]
+		if !ok {
+			ws = &walkState{
+				vtx:            vtx,
+				pendingParents: make(map[*walkState]struct{}),
+				pendingDeps:    make(map[*walkState]struct{}),
+			}
+			walkStates[id] = ws
+		}
+		deps := getdeps(vtx)
+		if len(deps) > 0 {
+			for _, dep := range deps {
+				depid := getid(dep)
+				depState, ok := walkStates[depid]
+				if !ok {
+					depState = &walkState{
+						vtx:            dep,
+						pendingParents: make(map[*walkState]struct{}),
+						pendingDeps:    make(map[*walkState]struct{}),
+					}
+					walkStates[depid] = depState
+				}
+				ws.pendingDeps[depState] = struct{}{}
+				depState.pendingParents[ws] = struct{}{}
+			}
+		} else {
+			allDepsReady[ws] = struct{}{}
+		}
+		return nil
+	})
+
+	for len(allDepsReady) > 0 {
+		newAllDepsReady := make(map[*walkState]struct{})
+		for ws := range allDepsReady {
+			visit(ws.vtx)
+			for parent := range ws.pendingParents {
+				delete(parent.pendingDeps, ws)
+				if len(parent.pendingDeps) == 0 {
+					newAllDepsReady[parent] = struct{}{}
+				}
+			}
+		}
+		allDepsReady = newAllDepsReady
+	}
 }

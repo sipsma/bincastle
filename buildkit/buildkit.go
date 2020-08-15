@@ -95,6 +95,7 @@ type BincastleArgs struct {
 	SourceLocalDir string
 	SourceSubdir   string
 	SourcerName    string
+	LocalOverrides []string
 
 	LLB *llb.Definition
 
@@ -129,6 +130,10 @@ func BincastleBuild(ctx context.Context, args BincastleArgs) error {
 	localDirs := make(map[string]string)
 	if args.SourceLocalDir != "" {
 		localDirs[args.SourceLocalDir] = args.SourceLocalDir
+	}
+	for _, kv := range args.LocalOverrides {
+		path := strings.SplitN(kv, "=", 2)[1]
+		localDirs[path] = path
 	}
 
 	var cacheImport []client.CacheOptionsEntry
@@ -189,12 +194,13 @@ func BincastleBuild(ctx context.Context, args BincastleArgs) error {
 	if args.LLB == nil {
 		frontend = "bincastle"
 		frontendAttrs = map[string]string{
-			KeyGitURL:      args.SourceGitURL,
-			KeyGitRef:      args.SourceGitRef,
-			KeyLocalDir:    args.SourceLocalDir,
-			KeySubdir:      args.SourceSubdir,
-			KeySourcerName: args.SourcerName,
-			KeyRunType:     string(runType),
+			KeyGitURL:         args.SourceGitURL,
+			KeyGitRef:         args.SourceGitRef,
+			KeyLocalDir:       args.SourceLocalDir,
+			KeySubdir:         args.SourceSubdir,
+			KeySourcerName:    args.SourcerName,
+			KeyRunType:        string(runType),
+			KeyLocalOverrides: strings.Join(args.LocalOverrides, ":"),
 		}
 	}
 
@@ -748,7 +754,7 @@ func (e *runcExecutor) Run(
 			Source: "/dev/fuse",
 		},
 		ctr.BindMount{
-			Dest: "/bincastle.sock",
+			Dest:   "/bincastle.sock",
 			Source: socket,
 		},
 	)

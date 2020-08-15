@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,12 +30,13 @@ import (
 )
 
 const (
-	KeyGitURL      = "git-url"
-	KeyGitRef      = "git-ref"
-	KeyLocalDir    = "local-dir"
-	KeySubdir      = "subdir"
-	KeySourcerName = "sourcer-name"
-	KeyRunType     = "runtype"
+	KeyGitURL         = "git-url"
+	KeyGitRef         = "git-ref"
+	KeyLocalDir       = "local-dir"
+	KeySubdir         = "subdir"
+	KeySourcerName    = "sourcer-name"
+	KeyRunType        = "runtype"
+	KeyLocalOverrides = "local-overrides"
 )
 
 const (
@@ -57,7 +59,7 @@ func (s golangDefinitionSourcer) DefinitionSource(llbsrc AsSpec, cmdPath string)
 	return Build(LayerSpec(
 			Dep(LayerSpec(
 				Dep(Image{Ref: "docker.io/eriksipsma/golang-singleuser:latest"}),
-				Shell(
+				BuildScript(
 					`/sbin/apk add build-base git`,
 				), // TODO update the image with these?
 			)),
@@ -65,8 +67,8 @@ func (s golangDefinitionSourcer) DefinitionSource(llbsrc AsSpec, cmdPath string)
 			Env("PATH", "/bin:/sbin:/usr/bin:/usr/local/go/bin:/go/bin"),
 			Env("GO111MODULE", "on"),
 			Env("GOPATH", "/build"),
-			ScratchMount(`/build`),
-			Shell(
+			BuildScratch(`/build`),
+			BuildScript(
 				fmt.Sprintf(`cd %s`, filepath.Join(`/llbsrc`, cmdPath)),
 				// TODO better way of getting static bin?
 				`go build -a -tags "netgo osusergo" -ldflags '-w -extldflags "-static"' -o /llbgen .`,
@@ -80,13 +82,14 @@ func (s golangDefinitionSourcer) DefinitionSource(llbsrc AsSpec, cmdPath string)
 }
 
 type args struct {
-	GitURL       string
-	GitRef       string
-	LocalDir     string
-	Subdir       string
-	Sourcer      DefinitionSourcer
-	RunType      RunType
-	CacheImports []frontend.CacheOptionsEntry
+	GitURL         string
+	GitRef         string
+	LocalDir       string
+	Subdir         string
+	Sourcer        DefinitionSourcer
+	RunType        RunType
+	LocalOverrides []string
+	CacheImports   []frontend.CacheOptionsEntry
 }
 
 // TODO this is pretty dumb, it should be removed once there's an official merge-op (which
@@ -103,16 +106,20 @@ const (
 
 func getargs(opts map[string]string) (*args, error) {
 	a := args{
-		GitURL:   opts[KeyGitURL],
-		GitRef:   opts[KeyGitRef],
-		LocalDir: opts[KeyLocalDir],
-		Subdir:   opts[KeySubdir],
-		RunType:  RunType(opts[KeyRunType]),
+		GitURL:         opts[KeyGitURL],
+		GitRef:         opts[KeyGitRef],
+		LocalDir:       opts[KeyLocalDir],
+		Subdir:         opts[KeySubdir],
+		RunType:        RunType(opts[KeyRunType]),
 	}
 	if sourcer, ok := definitionSourcers[opts[KeySourcerName]]; !ok {
 		return nil, fmt.Errorf("unknown definition sourcer %q", opts[KeySourcerName])
 	} else {
 		a.Sourcer = sourcer
+	}
+
+	if overrides := opts[KeyLocalOverrides]; overrides != "" {
+		a.LocalOverrides = strings.Split(overrides, ":")
 	}
 
 	if a.GitURL != "" && a.LocalDir != "" {
@@ -162,7 +169,7 @@ type solveReq struct {
 	resultCh chan<- *solveResult
 
 	cleanupOnce sync.Once
-	cleanupFunc  func()
+	cleanupFunc func()
 }
 
 func (r *solveReq) cleanup() {
@@ -224,7 +231,7 @@ func (f *BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronte
 					curExecReq = req
 					go func() {
 						defer close(done)
-						err := f.exec(solveCtx, llbBridge, req.args, sid, req.mounts, nil)
+						err := f.exec(solveCtx, llbBridge, req.args, sid, req.layers, req.mounts, nil)
 						done <- &solveResult{Result: &frontend.Result{}, err: err}
 					}()
 				}
@@ -345,6 +352,10 @@ func (f *BincastleFrontend) getLayers(
 		process.Meta = *meta
 	} else {
 		return nil, nil, nil, fmt.Errorf("invalid empty meta for definition source")
+	}
+
+	for _, override := range a.LocalOverrides {
+		process.Meta.Env = append(process.Meta.Env, override)
 	}
 
 	type output struct {
@@ -517,8 +528,20 @@ func (f *BincastleFrontend) allLayerSolve(
 
 func (f *BincastleFrontend) exec(
 	ctx context.Context, llbBridge frontend.FrontendLLBBridge, a *args, sid string,
-	mounts []executor.Mount, started chan<- struct{},
+	layers []graph.MarshalLayer, mounts []executor.Mount, started chan<- struct{},
 ) error {
+	// TODO this is very silly, just find the first layer with runtime args and assume that's
+	// the one you are supposed to run
+	var meta executor.Meta
+	for _, layer := range layers {
+		if len(layer.Args) > 0 {
+			meta.Args = layer.Args
+			meta.Cwd = layer.WorkingDir
+			meta.Env = layer.Env
+			break
+		}
+	}
+
 	// TODO don't hardcode
 	execName := "home"
 	const execKey = "bincastle.ExecName"
@@ -583,11 +606,7 @@ func (f *BincastleFrontend) exec(
 		Stdin:  os.Stdin,
 		Stdout: os.Stdout,
 		Resize: execResizeCh,
-		// TODO Don't hardcode; add way of configuring defaults in graph def and overrides from cmdline
-		Meta: executor.Meta{
-			Args: []string{"/bin/sh", "-l"},
-			Cwd:  "/",
-		},
+		Meta:   meta,
 	}
 
 	if err := llbBridge.Run(ctx, ExecNameToID(execName), execRef, mounts, execProcess, started); err != nil {

@@ -11,9 +11,12 @@ import (
 // an official MergeOp exists.
 
 type MarshalLayer struct {
-	LLB       []byte `json:"LLB"`
-	MountDir  string `json:"MountDir"`
-	OutputDir string `json:"OutputDir"`
+	LLB        []byte   `json:"LLB"`
+	OutputDir  string   `json:"OutputDir"`
+	MountDir   string   `json:"MountDir"`
+	Env        []string `json:"Env"`
+	Args       []string `json:"Args"`
+	WorkingDir string   `json:"WorkingDir"`
 }
 
 func (g *Graph) MarshalLayers(ctx context.Context, co ...llb.ConstraintsOpt) ([]MarshalLayer, error) {
@@ -34,12 +37,22 @@ func (g *Graph) MarshalLayers(ctx context.Context, co ...llb.ConstraintsOpt) ([]
 			return nil, err
 		}
 
-		marshalLayers = append(marshalLayers, MarshalLayer{
+		marshalLayer := MarshalLayer{
 			LLB:       bytes,
 			MountDir:  layer.mountDir,
 			OutputDir: layer.outputDir,
-		})
+		}
+		// TODO a lil silly...
+		if len(layer.args) > 0 {
+			marshalLayer.Args = layer.args
+			marshalLayer.WorkingDir = layer.cwd
+			for _, kv := range layer.mergedEnv() {
+				marshalLayer.Env = append(marshalLayer.Env, kv.String())
+			}
+		}
+		marshalLayers = append(marshalLayers, marshalLayer)
 	}
+
 	return marshalLayers, nil
 }
 

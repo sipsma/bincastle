@@ -2,12 +2,15 @@ package graph
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/moby/buildkit/client/llb"
 	"github.com/opencontainers/go-digest"
 )
+
+const EnvOverridesPrefix = "BINCASTLE_OVERRIDE_"
 
 type SpecOptFunc func(AsSpec) AsSpec
 
@@ -32,6 +35,8 @@ func Wrapped(wraps ...GraphOpt) SpecOpt {
 	})
 }
 
+// TODO need to doc how Replace is different than Override... Maybe
+// choose some better names too to help?
 func Replace(asSpec AsSpec, replacee AsSpec, replacer AsSpec) AsSpec {
 	return Replaced(replacee, replacer).ApplyToSpec(asSpec)
 }
@@ -45,6 +50,85 @@ func Replaced(replacee AsSpec, replacer AsSpec) SpecOpt {
 		}}
 	})
 }
+
+func Override(asSpec, overridee, overrider AsSpec) AsSpec {
+	return Overridden(overridee, overrider).ApplyToSpec(asSpec)
+}
+
+func Overridden(overridee, overrider AsSpec) SpecOpt {
+	return overridden(overridee, overrider, make(map[AsSpec]Spec))
+}
+
+func overridden(overridee, overrider AsSpec, cache map[AsSpec]Spec) SpecOpt {
+	return SpecOptFunc(func(s AsSpec) AsSpec {
+		return BuildableSpec{&override{
+			spec:      s,
+			overridee: overridee,
+			overrider: overrider,
+			cache:     cache,
+		}}
+	})
+}
+
+func canonName(name string) string {
+	return strings.ReplaceAll(strings.ToLower(name), "-", "_")
+}
+
+func findByName(s AsSpec, name string, cache map[AsSpec]Spec) AsSpec {
+	var found AsSpec
+	walkSpecs(s, cache, func(asSpec AsSpec) error {
+		spec := cache[asSpec]
+		if spec == nil {
+			spec = asSpec.Spec()
+			cache[asSpec] = spec
+		}
+		if canonName(NameOf(spec)) == canonName(name) {
+			found = asSpec
+			return StopWalk
+		}
+		return nil
+	})
+	return found
+}
+
+// overrides is a map of layer name -> local path to use instead
+func LocalOverrides(overrides map[string]string) SpecOpt {
+	cache := make(map[AsSpec]Spec)
+	return SpecOptFunc(func(s AsSpec) AsSpec {
+		var opts []SpecOpt
+		for name, path := range overrides {
+			overridee := findByName(s, name, cache)
+			if overridee == nil {
+				continue
+			}
+			opts = append(opts, overridden(overridee, Local{
+				Path: path,
+				IsOverride: true,
+			}, cache))
+		}
+		return s.Spec().With(opts...)
+	})
+}
+
+type envOverrides int
+
+func (envOverrides) ApplyToSpec(s AsSpec) AsSpec {
+	overrides := make(map[string]string)
+	for _, kv := range os.Environ() {
+		split := strings.SplitN(kv, "=", 2)
+		k, v := split[0], split[1]
+		if !strings.HasPrefix(k, EnvOverridesPrefix) {
+			continue
+		}
+		name := strings.SplitN(k, EnvOverridesPrefix, 2)[1]
+		if name != "" {
+			overrides[name] = v
+		}
+	}
+	return LocalOverrides(overrides).ApplyToSpec(s)
+}
+
+const EnvOverrides = envOverrides(0)
 
 type LayerSpecOpt interface {
 	ApplyToLayerSpecOpts(LayerSpecOpts) LayerSpecOpts
@@ -85,8 +169,8 @@ func MergeLayerSpecOpts(opts ...LayerSpecOpt) LayerSpecOpt {
 
 func Dep(asSpec AsSpec) LayerSpecOpt {
 	return LayerSpecOptFunc(func(ls LayerSpecOpts) LayerSpecOpts {
-		ls.RunDeps = append(ls.RunDeps, asSpec)
-		ls.BuildDeps = append(ls.BuildDeps, asSpec)
+		ls = RunDep(asSpec).ApplyToLayerSpecOpts(ls)
+		ls = BuildDep(asSpec).ApplyToLayerSpecOpts(ls)
 		return ls
 	})
 }
@@ -116,12 +200,18 @@ type MountDir string
 
 func (dir MountDir) ApplyToLayerSpecOpts(ls LayerSpecOpts) LayerSpecOpts {
 	ls.MountDir = string(dir)
-	return ls
+	return updatedOverrideEnv(ls)
 }
 
 func (dir MountDir) ApplyToGraph(g *Graph) *Graph {
 	return simpleTransform(func(l Layer) Layer {
 		l.mountDir = string(dir)
+		if IsLocalOverride(l) && NameOf(l) != "" {
+			if l.env == nil {
+				l.env = make(map[string]string)
+			}
+			l.env[EnvOverridesPrefix+canonName(NameOf(l))] = string(dir)
+		}
 		return l
 	}).ApplyToGraph(g)
 }
@@ -138,41 +228,77 @@ func (i Image) Spec() Spec {
 
 type Local struct {
 	Path string
+	IsOverride bool
 }
 
 func (l Local) Spec() Spec {
-	return BuildableSpec{&LayerSpecOpts{
+	return BuildableSpec{LayerSpecOpts{
 		BaseState: llb.Local(l.Path),
-	}}
+	}.Apply(LocalOverride(l.IsOverride))}
 }
 
-func llbToLayerSpecOpt(opts ...llb.RunOption) LayerSpecOpt {
+func BuildScratch(dest string) LayerSpecOpt {
 	return LayerSpecOptFunc(func(ls LayerSpecOpts) LayerSpecOpts {
-		ls.ExecOpts = append([]llb.RunOption{}, ls.ExecOpts...)
-		ls.ExecOpts = append(ls.ExecOpts, opts...)
+		ls.BuildExecOpts = append(ls.BuildExecOpts,
+			llb.AddMount(dest, llb.Scratch(), llb.ForceNoOutput))
 		return ls
 	})
 }
 
-func ScratchMount(dest string) LayerSpecOpt {
-	return llbToLayerSpecOpt(llb.AddMount(dest, llb.Scratch(), llb.ForceNoOutput))
+func BuildEnv(k string, v string) LayerSpecOpt {
+	return LayerSpecOptFunc(func(ls LayerSpecOpts) LayerSpecOpts {
+		ls.BuildExecOpts = append(ls.BuildExecOpts, llb.AddEnv(k, v))
+		return ls
+	})
+}
+
+func RunEnv(k string, v string) LayerSpecOpt {
+	return LayerSpecOptFunc(func(ls LayerSpecOpts) LayerSpecOpts {
+		if ls.RunEnv == nil {
+			ls.RunEnv = make(map[string]string)
+		}
+		ls.RunEnv[k] = v
+		return ls
+	})
 }
 
 func Env(k string, v string) LayerSpecOpt {
-	return llbToLayerSpecOpt(llb.AddEnv(k, v))
+	return LayerSpecOptFunc(func(ls LayerSpecOpts) LayerSpecOpts {
+		ls = BuildEnv(k, v).ApplyToLayerSpecOpts(ls)
+		ls = RunEnv(k, v).ApplyToLayerSpecOpts(ls)
+		return ls
+	})
 }
 
-func Args(args ...string) LayerSpecOpt {
-	return llbToLayerSpecOpt(llb.Args(args))
+func BuildArgs(args ...string) LayerSpecOpt {
+	return LayerSpecOptFunc(func(ls LayerSpecOpts) LayerSpecOpts {
+		ls.BuildExecOpts = append(ls.BuildExecOpts, llb.Args(args))
+		return ls
+	})
 }
 
-func Shell(lines ...string) LayerSpecOpt {
-	return Args("sh", "-e", "-c", fmt.Sprintf(
+func RunArgs(args ...string) LayerSpecOpt {
+	return LayerSpecOptFunc(func(ls LayerSpecOpts) LayerSpecOpts {
+		ls.RunArgs = args
+		return ls
+	})
+}
+
+func BuildScript(lines ...string) LayerSpecOpt {
+	return BuildArgs(scriptArgs(lines...)...)
+}
+
+func RunScript(lines ...string) LayerSpecOpt {
+	return RunArgs(scriptArgs(lines...)...)
+}
+
+func scriptArgs(lines ...string) []string {
+	return []string{"sh", "-e", "-c", fmt.Sprintf(
 		// TODO using THEREALEOF allows callers to use <<EOF in their
 		// own shell lines, but is obviously extremely silly. What's better?
 		"exec sh <<\"THEREALEOF\"\n%s\nTHEREALEOF",
 		strings.Join(append([]string{`set -e`}, lines...), "\n"),
-	))
+	)}
 }
 
 // TODO better name?
@@ -180,7 +306,7 @@ type AlwaysRun bool
 
 func (alwaysRun AlwaysRun) ApplyToLayerSpecOpts(ls LayerSpecOpts) LayerSpecOpts {
 	if alwaysRun {
-		ls = llbToLayerSpecOpt(llb.IgnoreCache).ApplyToLayerSpecOpts(ls)
+		ls.BuildExecOpts = append(ls.BuildExecOpts, llb.IgnoreCache)
 	}
 	return ls
 }
