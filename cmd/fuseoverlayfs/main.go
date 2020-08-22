@@ -15,6 +15,6 @@ func main() {
 			distro.Bash{},
 		)),
 		Env("PATH", "/bin:/usr/bin"),
-		Shell(`cp -T $(which fuse-overlayfs) /fuse-overlayfs`),
+		BuildScript(`cp -T $(which fuse-overlayfs) /fuse-overlayfs`),
 	)))
 }

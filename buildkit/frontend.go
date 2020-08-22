@@ -11,13 +11,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/containerd/diff"
+	"github.com/containerd/containerd/leases"
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/cache/metadata"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/executor"
+	"github.com/moby/buildkit/exporter"
 	"github.com/moby/buildkit/frontend"
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/util/compression"
+	"github.com/moby/buildkit/util/leaseutil"
 	"github.com/moby/buildkit/worker"
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/sync/errgroup"
@@ -37,6 +42,7 @@ const (
 	KeySourcerName    = "sourcer-name"
 	KeyRunType        = "runtype"
 	KeyLocalOverrides = "local-overrides"
+	KeyImageRef       = "image-ref"
 )
 
 const (
@@ -90,6 +96,7 @@ type args struct {
 	RunType        RunType
 	LocalOverrides []string
 	CacheImports   []frontend.CacheOptionsEntry
+	ImageRef       string
 }
 
 // TODO this is pretty dumb, it should be removed once there's an official merge-op (which
@@ -106,11 +113,12 @@ const (
 
 func getargs(opts map[string]string) (*args, error) {
 	a := args{
-		GitURL:         opts[KeyGitURL],
-		GitRef:         opts[KeyGitRef],
-		LocalDir:       opts[KeyLocalDir],
-		Subdir:         opts[KeySubdir],
-		RunType:        RunType(opts[KeyRunType]),
+		GitURL:   opts[KeyGitURL],
+		GitRef:   opts[KeyGitRef],
+		LocalDir: opts[KeyLocalDir],
+		Subdir:   opts[KeySubdir],
+		RunType:  RunType(opts[KeyRunType]),
+		ImageRef: opts[KeyImageRef],
 	}
 	if sourcer, ok := definitionSourcers[opts[KeySourcerName]]; !ok {
 		return nil, fmt.Errorf("unknown definition sourcer %q", opts[KeySourcerName])
@@ -157,6 +165,9 @@ func getargs(opts map[string]string) (*args, error) {
 type BincastleFrontend struct {
 	cacheManager  cache.Manager
 	metadataStore *metadata.Store
+	applier       diff.Applier
+	imageExporter exporter.Exporter
+	leaseManager  leases.Manager
 
 	startOnce  sync.Once
 	newSolveCh chan *solveReq
@@ -183,10 +194,19 @@ type solveResult struct {
 	err error
 }
 
-func newBincastleFrontend(cacheManager cache.Manager, metadataStore *metadata.Store) *BincastleFrontend {
+func newBincastleFrontend(
+	cacheManager cache.Manager,
+	metadataStore *metadata.Store,
+	applier diff.Applier,
+	imageExporter exporter.Exporter,
+	leaseManager leases.Manager,
+) *BincastleFrontend {
 	return &BincastleFrontend{
 		cacheManager:  cacheManager,
 		metadataStore: metadataStore,
+		applier:       applier,
+		imageExporter: imageExporter,
+		leaseManager:  leaseManager,
 	}
 }
 
@@ -213,7 +233,7 @@ func (f *BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronte
 				solveCtx, solveCancel := context.WithCancel(ctx)
 				done := make(chan *solveResult)
 				switch req.args.RunType {
-				case LocalExport, ImageExport:
+				case LocalExport:
 					curExecReq = nil
 					go func() {
 						defer close(done)
@@ -226,6 +246,13 @@ func (f *BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronte
 						defer close(done)
 						res, err := f.allLayerSolve(solveCtx, llbBridge, req.args, sid, req.layers)
 						done <- &solveResult{Result: res, err: err}
+					}()
+				case ImageExport:
+					curExecReq = req
+					go func() {
+						defer close(done)
+						err := f.imageExport(solveCtx, llbBridge, req.args, sid, req.mounts)
+						done <- &solveResult{Result: &frontend.Result{}, err: err}
 					}()
 				case Exec:
 					curExecReq = req
@@ -407,7 +434,7 @@ func (f *BincastleFrontend) getLayers(
 	}
 	outRead.Close()
 
-	if a.RunType != Exec {
+	if a.RunType != Exec && a.RunType != ImageExport {
 		return layers, nil, nil, nil
 	}
 
@@ -524,6 +551,74 @@ func (f *BincastleFrontend) allLayerSolve(
 		Definition:   llbDef.ToPB(),
 		CacheImports: a.CacheImports,
 	}, sid)
+}
+
+func (f *BincastleFrontend) imageExport(
+	ctx context.Context, llbBridge frontend.FrontendLLBBridge, a *args, sid string,
+	refMounts []executor.Mount,
+) error {
+	ctx, done, err := leaseutil.WithLease(ctx, f.leaseManager, leaseutil.MakeTemporary)
+	if err != nil {
+		return err
+	}
+	defer done(ctx)
+
+	finalRef, err := f.cacheManager.New(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer finalRef.Release(context.TODO())
+	mountable, err := finalRef.Mount(ctx, false)
+	if err != nil {
+		return err
+	}
+	mounts, cleanup, err := mountable.Mount()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	for _, refMount := range refMounts {
+		ref := refMount.Src.(cache.ImmutableRef)
+		if err := ref.Finalize(ctx, true); err != nil {
+			return err
+		}
+		remote, err := ref.GetRemote(ctx, true, compression.Default)
+		if err != nil {
+			return err
+		}
+		if lazy, ok := remote.Provider.(cache.Unlazier); ok {
+			if err := lazy.Unlazy(ctx); err != nil {
+				return err
+			}
+		}
+		desc := remote.Descriptors[0]
+		// TODO this ignores output/mount dir entirely
+		_, err = f.applier.Apply(ctx, desc, mounts)
+		if err != nil {
+			return fmt.Errorf("failed to apply: %w", err)
+		}
+	}
+
+	cleanup()
+	iRef, err := finalRef.Commit(ctx)
+	if err != nil {
+		return err
+	}
+
+	e, err := f.imageExporter.Resolve(ctx, map[string]string{
+		"name": a.ImageRef,
+		"push": "true",
+	})
+	if err != nil {
+		return err
+	}
+
+	_, err = e.Export(ctx, exporter.Source{Ref: iRef}, sid)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (f *BincastleFrontend) exec(

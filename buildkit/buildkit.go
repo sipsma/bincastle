@@ -15,6 +15,7 @@ import (
 	"github.com/containerd/console"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/content/local"
+	"github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/diff/apply"
 	"github.com/containerd/containerd/diff/walking"
 	"github.com/containerd/containerd/gc"
@@ -40,6 +41,7 @@ import (
 	"github.com/moby/buildkit/control"
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/executor/oci"
+	"github.com/moby/buildkit/exporter"
 	"github.com/moby/buildkit/frontend"
 	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/session"
@@ -169,13 +171,8 @@ func BincastleBuild(ctx context.Context, args BincastleArgs) error {
 			return fmt.Errorf("can only specify one export type at time for now")
 		}
 		runType = ImageExport
-		exports = append(exports, client.ExportEntry{
-			Type: "image",
-			Attrs: map[string]string{
-				"name": args.ExportImageRef,
-				"push": "true",
-			},
-		})
+		// image export is currently handled entirely in frontend, so no
+		// exports for now
 	}
 
 	if args.ExportLocalDir != "" {
@@ -201,6 +198,7 @@ func BincastleBuild(ctx context.Context, args BincastleArgs) error {
 			KeySourcerName:    args.SourcerName,
 			KeyRunType:        string(runType),
 			KeyLocalOverrides: strings.Join(args.LocalOverrides, ":"),
+			KeyImageRef:       args.ExportImageRef,
 		}
 	}
 
@@ -311,13 +309,13 @@ func newController(mountBackend ctr.MountBackend) (*control.Controller, func() e
 		return nil, nil, nil, err
 	}
 
-	wc, cleanup, workerBackend, err := newWorkerController(mountBackend)
+	wc, cleanup, workerBackend, err := newWorkerController(mountBackend, sessionManager)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
 	frontends := map[string]frontend.Frontend{
-		"bincastle": newBincastleFrontend(workerBackend.CacheManager, workerBackend.MetadataStore),
+		"bincastle": newBincastleFrontend(workerBackend.CacheManager, workerBackend.MetadataStore, workerBackend.Applier, workerBackend.ImageExporter, workerBackend.LeaseManager),
 	}
 
 	remoteCacheExporterFuncs := map[string]remotecache.ResolveCacheExporterFunc{
@@ -351,10 +349,10 @@ func newController(mountBackend ctr.MountBackend) (*control.Controller, func() e
 	return ctrler, cleanup, workerBackend, nil
 }
 
-func newWorkerController(mountBackend ctr.MountBackend) (*worker.Controller, func() error, *workerBackend, error) {
+func newWorkerController(mountBackend ctr.MountBackend, sm *session.Manager) (*worker.Controller, func() error, *workerBackend, error) {
 	wc := &worker.Controller{}
 
-	workers, cleanup, workerBackend, err := RuncWorkers(Root, gcKeepStorage, mountBackend)
+	workers, cleanup, workerBackend, err := RuncWorkers(Root, gcKeepStorage, mountBackend, sm)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -370,9 +368,9 @@ func newWorkerController(mountBackend ctr.MountBackend) (*worker.Controller, fun
 }
 
 func RuncWorkers(
-	root string, gcKeepStorage int64, mountBackend ctr.MountBackend,
+	root string, gcKeepStorage int64, mountBackend ctr.MountBackend, sm *session.Manager,
 ) ([]worker.Worker, func() error, *workerBackend, error) {
-	w, cleanup, workerBackend, err := runcWorker(root, gcKeepStorage, mountBackend)
+	w, cleanup, workerBackend, err := runcWorker(root, gcKeepStorage, mountBackend, sm)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -380,7 +378,7 @@ func RuncWorkers(
 }
 
 func runcWorker(
-	root string, gcKeepStorage int64, mountBackend ctr.MountBackend,
+	root string, gcKeepStorage int64, mountBackend ctr.MountBackend, sm *session.Manager,
 ) (worker.Worker, func() error, *workerBackend, error) {
 	snapshotterName := "overlayfs"
 	name := fmt.Sprintf("runc-%s", snapshotterName)
@@ -454,6 +452,8 @@ func runcWorker(
 		return nil, nil, nil, err
 	}
 
+	applier := winlayers.NewFileSystemApplierWithWindows(bkContentStore, apply.NewFileSystemApplier(bkContentStore))
+
 	opt := base.WorkerOpt{
 		ID:              id,
 		Labels:          labels,
@@ -461,7 +461,7 @@ func runcWorker(
 		Executor:        newExecutor,
 		Snapshotter:     bkSnapshotter,
 		ContentStore:    bkContentStore,
-		Applier:         winlayers.NewFileSystemApplierWithWindows(bkContentStore, apply.NewFileSystemApplier(bkContentStore)),
+		Applier:         applier,
 		Differ:          winlayers.NewWalkingDiffWithWindows(bkContentStore, walking.NewWalkingDiff(bkContentStore)),
 		ImageStore:      imageStore,
 		Platforms:       []imageSpec.Platform{platforms.Normalize(platforms.DefaultSpec())},
@@ -491,6 +491,11 @@ func runcWorker(
 		return nil, nil, nil, err
 	}
 
+	imageExporter, err := w.Exporter(client.ExporterImage, sm)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	// TODO do cleanup throughout the above function in case of error
 	return w, func() error {
 			newExecutor.Shutdown()
@@ -504,7 +509,10 @@ func runcWorker(
 			Snapshotter:   bkSnapshotter,
 			ImageStore:    imageStore,
 			CacheManager:  w.CacheManager(),
+			Applier:       applier,
 			MetadataStore: bkMetaDB,
+			ImageExporter: imageExporter,
+			LeaseManager:  w.LeaseManager,
 		}, nil
 }
 
@@ -513,7 +521,10 @@ type workerBackend struct {
 	Snapshotter   snapshot.Snapshotter
 	ImageStore    images.Store
 	CacheManager  cache.Manager
+	Applier       diff.Applier
 	MetadataStore *cacheMetadata.Store
+	ImageExporter exporter.Exporter
+	LeaseManager  leases.Manager
 }
 
 type runcExecutor struct {
