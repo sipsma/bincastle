@@ -46,8 +46,7 @@ const (
 )
 
 const (
-	defaultGitRef         = "master"
-	defaultSourceImageRef = "docker.io/eriksipsma/golang-singleuser:latest"
+	defaultGitRef = "master"
 )
 
 type DefinitionSourcer interface {
@@ -63,14 +62,10 @@ type golangDefinitionSourcer struct{}
 
 func (s golangDefinitionSourcer) DefinitionSource(llbsrc AsSpec, cmdPath string) (*Graph, *executor.Meta, error) {
 	return Build(LayerSpec(
-			Dep(LayerSpec(
-				Dep(Image{Ref: "docker.io/eriksipsma/golang-singleuser:latest"}),
-				BuildScript(
-					`/sbin/apk add build-base git`,
-				), // TODO update the image with these?
-			)),
+			Dep(Wrap(Image{Ref: "docker.io/eriksipsma/bincastle-sysroot:latest"}, AppendOutputDir("/sysroot"))),
 			BuildDep(Wrap(llbsrc, MountDir("/llbsrc"))),
-			Env("PATH", "/bin:/sbin:/usr/bin:/usr/local/go/bin:/go/bin"),
+			Env("PATH", "/tools/bin:/tools/sbin:/go/bin"),
+			Env("SSL_CERT_DIR", "/tools/etc/pki/tls/certs"),
 			Env("GO111MODULE", "on"),
 			Env("GOPATH", "/build"),
 			BuildScratch(`/build`),
@@ -406,13 +401,10 @@ func (f *BincastleFrontend) getLayers(
 		Readonly: true,
 	}}
 	if err := llbBridge.Run(ctx, id, rootfs, defSourceMounts, process, nil); err != nil {
-		// TODO include output from process for debugging?
-
-		// TODO
+		// TODO including output from process for debugging, could be massive amounts of text
 		outWrite.Close()
 		out := <-outputCh
 
-		// TODO
 		return nil, nil, nil, fmt.Errorf("failed to run definition source: %w\n%s", err, string(out.bytes))
 	}
 	outWrite.Close()
@@ -523,10 +515,15 @@ func (f *BincastleFrontend) allLayerSolve(
 	// doesn't do anything and export the cache for it.
 	// TODO This will (thankfully!) not be needed once there's a real merge-op.
 	runOpts := []llb.RunOption{
-		llb.Args([]string{"/bin/true"}),
-		llb.AddMount(util.LowerDir{
-			Dest: "/",
-		}.String(), llb.Image("docker.io/eriksipsma/golang-singleuser:latest"), llb.Readonly),
+		llb.Args([]string{"/tools/bin/true"}),
+		llb.AddMount(
+			util.LowerDir{
+				Dest: "/",
+			}.String(),
+			llb.Image("docker.io/eriksipsma/bincastle-sysroot:latest"),
+			llb.Readonly,
+			llb.SourcePath("/sysroot"),
+		),
 	}
 	for i, layer := range layers {
 		var def pb.Definition

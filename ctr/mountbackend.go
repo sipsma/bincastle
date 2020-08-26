@@ -71,7 +71,7 @@ func (b FuseOverlayfsBackend) SetupTree(mt *MountTree, cs ContainerState, upperd
 		return nil, cleanup, fmt.Errorf("failed to create fuse overlay mount dir %q: %w", mountDir, err)
 	}
 
-	extraFuseOpts := []string{"clone_fd", "auto_unmount"}
+	extraFuseOpts := []string{"clone_fd", "auto_unmount", "noatime"}
 
 	var ocimounts []oci.Mount
 
