@@ -77,6 +77,9 @@ func canonName(name string) string {
 func findByName(s AsSpec, name string, cache map[AsSpec]Spec) AsSpec {
 	var found AsSpec
 	walkSpecs(s, cache, func(asSpec AsSpec) error {
+		if asSpec == nil {
+			return nil
+		}
 		spec := cache[asSpec]
 		if spec == nil {
 			spec = asSpec.Spec()

@@ -3,11 +3,11 @@ package graph
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"path/filepath"
-	"encoding/json"
+	"sort"
 
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/solver/llbsolver"
@@ -116,8 +116,9 @@ func (ls *LayerSpecOpts) Build(depGraphs []*Graph) *Graph {
 	layer.cwd = ls.RunWorkingDir
 	layer.metadata = ls.metadata
 
-	layer.Graph.roots = []*Layer{layer}
+	layer.roots = []*Layer{layer}
 	layer.digest = layer.calcDigest()
+	layer.origDigest = layer.digest
 	return &layer.Graph
 }
 
@@ -180,6 +181,12 @@ func (ws *wrap) Metadata(interface{}) interface{} {
 	return nil
 }
 
+// TODO need to support multiple replacements in a single spec,
+// otherwise you can get unexpected results when chaining replaces.
+// i.e. you start with A->B->C->D and then do a replace of D with nil
+// that results in A'->B'->C', but then you do another replace of B
+// with C, which right now results in A'->C->D instead of the expected
+// A'->C'
 type replace struct {
 	spec     AsSpec
 	replacee AsSpec
@@ -198,7 +205,7 @@ func (r *replace) Build(depGraphs []*Graph) *Graph {
 	// old layer digest -> *Graph replacing it
 	oldToNew := make(map[digest.Digest]*Graph)
 	g.bottomUpWalk(func(l *Layer) {
-		if l.digest == replacee.digest {
+		if l.digest == replacee.digest || l.origDigest == replacee.digest {
 			oldToNew[l.digest] = replacer
 			return
 		}
@@ -206,22 +213,25 @@ func (r *replace) Build(depGraphs []*Graph) *Graph {
 		newLayer := *l
 		newLayer.Graph.roots = []*Layer{&newLayer}
 
-		newLayer.index = 0
 		var newDepGraphs []*Graph
 		if l.deps != nil {
 			for _, dep := range l.deps.roots {
 				if newDepGraph := oldToNew[dep.digest]; newDepGraph != nil {
 					newDepGraphs = append(newDepGraphs, newDepGraph)
-					for _, dep := range newDepGraph.roots {
-						if dep.index+1 > newLayer.index {
-							newLayer.index = dep.index + 1
-						}
-					}
 				}
 			}
 		}
-		newDeps := mergeGraphs(newDepGraphs...)
-		newLayer.deps = newDeps
+
+		newLayer.deps = mergeGraphs(newDepGraphs...)
+		newLayer.index = 0
+		if newLayer.deps != nil {
+			for _, dep := range newLayer.deps.roots {
+				if dep.index+1 > newLayer.index {
+					newLayer.index = dep.index + 1
+				}
+			}
+		}
+
 		newLayer.digest = newLayer.calcDigest()
 		oldToNew[l.digest] = &newLayer.Graph
 	})
@@ -293,7 +303,13 @@ func (o *override) Deps() []AsSpec {
 	})
 
 	if newSpec, ok := oldToNew[o.spec]; ok {
-		return newSpec.Spec().Deps()
+		spec := o.cache[newSpec]
+		if spec == nil {
+			spec = newSpec.Spec()
+			o.cache[newSpec] = spec
+		}
+
+		return spec.Deps()
 	}
 	return o.cache[o.spec].Deps()
 }
@@ -460,12 +476,18 @@ type Layer struct {
 	state     llb.State
 	mountDir  string
 	outputDir string
-	args []string
-	env  map[string]string
-	cwd  string
+	args      []string
+	env       map[string]string
+	cwd       string
 
 	// metadata is not included in digest
 	metadata map[interface{}]interface{}
+
+	// if this layer gets transformed, then digest may
+	// change, but origDigest will always be the same,
+	// which allows you to stably identify it across
+	// transformations.
+	origDigest digest.Digest
 }
 
 func (l Layer) Metadata(key interface{}) interface{} {
@@ -535,11 +557,11 @@ func (g *Graph) calcDigest() digest.Digest {
 	// it does silly things w/ the args and env. Should
 	// figure out way to use it though
 	type Marshal struct {
-		MountDir string
+		MountDir  string
 		OutputDir string
-		Args []string
-		Env []kvpair
-		Cwd string
+		Args      []string
+		Env       []kvpair
+		Cwd       string
 		LLBDigest string
 		DepDigest string
 	}
@@ -548,11 +570,11 @@ func (g *Graph) calcDigest() digest.Digest {
 		l := g.roots[0]
 
 		m := Marshal{
-			MountDir: filepath.Clean(l.mountDir),
+			MountDir:  filepath.Clean(l.mountDir),
 			OutputDir: filepath.Clean(l.outputDir),
-			Args: l.args,
-			Env: l.mergedEnv(),
-			Cwd: filepath.Clean(l.cwd),
+			Args:      l.args,
+			Env:       l.mergedEnv(),
+			Cwd:       filepath.Clean(l.cwd),
 		}
 
 		if l.deps != nil {
@@ -810,11 +832,15 @@ func bottomUpWalk(
 		return nil
 	})
 
+	var stillPendings map[*walkState]struct{}
+
 	for len(allDepsReady) > 0 {
 		newAllDepsReady := make(map[*walkState]struct{})
+		stillPendings = make(map[*walkState]struct{})
 		for ws := range allDepsReady {
 			visit(ws.vtx)
 			for parent := range ws.pendingParents {
+				stillPendings[parent] = struct{}{}
 				delete(parent.pendingDeps, ws)
 				if len(parent.pendingDeps) == 0 {
 					newAllDepsReady[parent] = struct{}{}
@@ -822,5 +848,10 @@ func bottomUpWalk(
 			}
 		}
 		allDepsReady = newAllDepsReady
+	}
+
+	if len(stillPendings) > 0 {
+		// TODO actually print unsatisfiable vtxs
+		panic("unable to satisfy deps in bottomUpWalk")
 	}
 }
