@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -18,8 +20,8 @@ import (
 	"github.com/sipsma/bincastle/buildkit"
 	"github.com/sipsma/bincastle/ctr"
 	"github.com/sipsma/bincastle/graph"
-	. "github.com/sipsma/bincastle/graph"
-	"github.com/urfave/cli"
+	"github.com/sirupsen/logrus"
+	"github.com/urfave/cli/v2"
 	"golang.org/x/sys/unix"
 
 	_ "github.com/opencontainers/runc/libcontainer/nsenter"
@@ -30,11 +32,9 @@ const (
 
 	runArg         = "run"
 	internalRunArg = "internalRun"
-	cleanArg       = "clean"
 )
 
 var (
-	homeDir       = os.Getenv("HOME")
 	sshAgentSock  = os.Getenv("SSH_AUTH_SOCK")
 	bincastleSock = os.Getenv("BINCASTLE_SOCK")
 
@@ -60,6 +60,12 @@ var (
 			Hidden: true,
 		},
 	}
+
+	verboseFlags = []cli.Flag{&cli.BoolFlag{
+		Name:    "verbose",
+		Aliases: []string{"v"},
+		Usage:   "show full output from every build",
+	}}
 )
 
 func joinflags(flagss ...[]cli.Flag) []cli.Flag {
@@ -71,10 +77,12 @@ func joinflags(flagss ...[]cli.Flag) []cli.Flag {
 }
 
 func init() {
+	logrus.SetOutput(ioutil.Discard)
+
 	if len(os.Args) > 1 && os.Args[1] == ctr.RuncInitArg {
 		runtime.GOMAXPROCS(1)
 		runtime.LockOSThread()
-		factory, _ := libcontainer.New("")
+		factory, _ := libcontainer.New("", libcontainer.RootlessCgroupfs)
 		err := factory.StartInitialization()
 		panic(err)
 	}
@@ -87,12 +95,21 @@ func main() {
 	}
 
 	app := &cli.App{
-		Commands: []cli.Command{
+		Commands: []*cli.Command{
 			{
 				Name:  runArg,
 				Usage: "start the system in a rootless container",
-				Flags: joinflags(exportImportFlags, imageExportFlags),
+				Flags: joinflags(exportImportFlags, imageExportFlags, verboseFlags),
 				Action: func(c *cli.Context) (err error) {
+					you, err := user.Current()
+					if err != nil {
+						return fmt.Errorf("failed to get current user: %w", err)
+					}
+					homeDir := you.HomeDir
+					if homeDir == "" {
+						return fmt.Errorf("cannot find user's home dir (is the $HOME env var set?)")
+					}
+
 					varDir := filepath.Join(homeDir, ".bincastle", "var")
 					err = os.MkdirAll(varDir, 0700)
 					if err != nil {
@@ -126,7 +143,7 @@ func main() {
 							Source: "/dev/fuse",
 						},
 						ctr.BindMount{
-							Dest:   "/self",
+							Dest:   "/bincastle",
 							Source: selfBin,
 							// NOTE: not setting this readonly because doing so can fail with
 							// EPERM when selfBin is not already mounted read-only. Later
@@ -156,6 +173,7 @@ func main() {
 						ExportImageRef:    c.String("export-image"),
 						SSHAgentSockPath:  sshAgentSock,
 						BincastleSockPath: bincastleSock,
+						Verbose:           c.Bool("verbose"),
 					}
 					if !strings.HasPrefix(c.Args().Get(0), "https://") && !strings.HasPrefix(c.Args().Get(0), "ssh://") {
 						bcArgs.SourceLocalDir = c.Args().Get(0)
@@ -174,7 +192,7 @@ func main() {
 
 					var needFuseOverlayfs bool
 					// TODO don't hardcode binary location, also /var is a weird place
-					if _, err := os.Stat("/home/sipsma/.bincastle/var/fuse-overlayfs"); os.IsNotExist(err) {
+					if _, err := os.Stat(filepath.Join(homeDir, ".bincastle/var/fuse-overlayfs")); os.IsNotExist(err) {
 						needFuseOverlayfs = true
 					} else if err != nil {
 						return err
@@ -190,16 +208,15 @@ func main() {
 					errCh := make(chan error, goCount)
 
 					if bcArgs.BincastleSockPath == "" {
-						// TODO
-						bcArgs.BincastleSockPath = "/home/sipsma/.bincastle/var/bincastle.sock"
+						bcArgs.BincastleSockPath = filepath.Join(homeDir, ".bincastle/var/bincastle.sock")
 						go func() {
 							defer cancel()
 							errCh <- runCtr(ctx, ctrState, ctr.ContainerDef{
 								ContainerProc: ctr.ContainerProc{
 									// don't use /proc/self/exe directly because it ends up being a
 									// memfd created by runc, which wreaks havoc later when inner containers
-									// need to mount /proc/self/exe to /self
-									Args:         append([]string{"/self", internalRunArg}, os.Args[2:]...),
+									// need to mount /proc/self/exe to /bincastle
+									Args:         append([]string{"/bincastle", internalRunArg}, os.Args[2:]...),
 									Env:          env,
 									WorkingDir:   "/var",
 									Uid:          uint32(unix.Geteuid()),
@@ -219,7 +236,6 @@ func main() {
 
 					go func() {
 						defer cancel()
-
 						timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 10*time.Second)
 						defer timeoutCancel()
 						// TODO don't hardcode
@@ -237,11 +253,12 @@ func main() {
 								return
 							} else if err := buildkit.BincastleBuild(ctx, buildkit.BincastleArgs{
 								LLB:              fuseoverlayDef,
-								ExportLocalDir:   "/home/sipsma/.bincastle/var", // TODO don't hardcode
+								ExportLocalDir:   filepath.Join(homeDir, ".bincastle/var"), // TODO don't hardcode
 								ImportCacheRef:   bcArgs.ImportCacheRef,
 								SSHAgentSockPath: bcArgs.SSHAgentSockPath,
 								// TODO don't hardcode
 								BincastleSockPath: bcArgs.BincastleSockPath,
+								Verbose:           c.Bool("verbose"),
 							}); err != nil {
 								errCh <- err
 								return
@@ -271,7 +288,7 @@ func main() {
 			{
 				Name:   internalRunArg,
 				Hidden: true,
-				Flags:  joinflags(exportImportFlags, imageExportFlags),
+				Flags:  joinflags(exportImportFlags, imageExportFlags, verboseFlags),
 				Action: func(c *cli.Context) (err error) {
 					sigchan := make(chan os.Signal, 1)
 					signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -316,14 +333,6 @@ func main() {
 						finalErr = multierror.Append(finalErr, <-errCh).ErrorOrNil()
 					}
 					return finalErr
-				},
-			},
-
-			{
-				Name:  cleanArg,
-				Usage: "remove any persisted filesystem changes and caches",
-				Action: func(c *cli.Context) error {
-					return os.RemoveAll(filepath.Join(homeDir, ".bincastle", "var"))
 				},
 			},
 		},

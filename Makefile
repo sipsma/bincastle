@@ -10,22 +10,22 @@ FUSE_OVERLAYFS_IMAGE_REF ?= bincastle-fuse-overlayfs:latest
 BINCASTLE=$(HOME)/.bincastle
 BINCASTLE_BIN = $(CURDIR)/bincastle
 BINCASTLE_BIN_SRC = $(CURDIR)/cmd/bincastle/bincastle.go
-ALL_SRC = $(wildcard $(CURDIR)/**/*.go)
+ALL_SRC = $(shell find $(CURDIR) -name '*.go') go.mod go.sum
+
+.PHONY: build
+build: $(BINCASTLE_BIN) ;
+
 $(BINCASTLE_BIN): $(ALL_SRC)
-	rm $(BINCASTLE_BIN) || true
 	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -a -tags "netgo osusergo" -ldflags '-w -extldflags "-static"' -o $(BINCASTLE_BIN) $(BINCASTLE_BIN_SRC)
 
-.PHONY: clean-bin
-clean-bin:
-	rm $(BINCASTLE_BIN) || true
+.PHONY: clean
+clean:
+	rm -f $(BINCASTLE_BIN)
 
-.PHONY: clean-state
-clean-state:
+.PHONY: dist-clean
+dist-clean:
 	chmod -R u+rwx $(BINCASTLE)/* || true
-	rm -rf $(BINCASTLE)/* || true
-
-.PHONY: rebuild
-rebuild: clean-bin $(BINCASTLE_BIN)
+	rm -rf $(BINCASTLE) || true
 
 .PHONY: fuse-overlayfs
 fuse-overlayfs: $(BINCASTLE_BIN)
