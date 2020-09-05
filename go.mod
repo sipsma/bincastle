@@ -20,22 +20,28 @@ replace github.com/docker/docker => github.com/docker/docker v1.4.2-0.2020022723
 replace github.com/checkpoint-restore/go-criu => github.com/checkpoint-restore/go-criu v0.0.0-20181120144056-17b0214f6c48
 
 require (
+	github.com/checkpoint-restore/go-criu v0.0.0-00010101000000-000000000000 // indirect
 	github.com/containerd/console v1.0.0
 	github.com/containerd/containerd v1.4.0-beta.2.0.20200728183644-eb6354a11860
 	github.com/containerd/fifo v0.0.0-20200410184934-f15a3290365b
 	github.com/creack/pty v1.1.10
+	github.com/cyphar/filepath-securejoin v0.2.2 // indirect
 	github.com/gofrs/flock v0.7.1
 	github.com/hashicorp/go-multierror v1.0.0
 	github.com/moby/buildkit v0.7.1-0.20200811165058-be534ae9a702
+	github.com/mrunalp/fileutils v0.0.0-20200520151820-abd8a0e76976 // indirect
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.0.1
 	github.com/opencontainers/runc v1.0.0-rc91
 	github.com/opencontainers/runtime-spec v1.0.3-0.20200520003142-237cc4f519e2
 	github.com/opentracing/opentracing-go v1.2.0
 	github.com/pkg/errors v0.9.1
-	github.com/sipsma/bincastle-distro v0.0.0-20200822012639-f20e1658b141
+	github.com/seccomp/libseccomp-golang v0.9.1 // indirect
+	github.com/sirupsen/logrus v1.6.0
 	github.com/stretchr/testify v1.5.1
-	github.com/urfave/cli v1.22.3
+	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
+	github.com/urfave/cli/v2 v2.2.0
+	github.com/vishvananda/netlink v1.1.0 // indirect
 	go.etcd.io/bbolt v1.3.5
 	golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a
 	golang.org/x/sys v0.0.0-20200327173247-9dae0f8f5775

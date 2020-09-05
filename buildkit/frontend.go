@@ -27,8 +27,8 @@ import (
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/sipsma/bincastle-distro/src"
 	"github.com/sipsma/bincastle/ctr"
+	"github.com/sipsma/bincastle/examples/distro/src"
 	"github.com/sipsma/bincastle/graph"
 	. "github.com/sipsma/bincastle/graph"
 	"github.com/sipsma/bincastle/util"
@@ -43,6 +43,7 @@ const (
 	KeyRunType        = "runtype"
 	KeyLocalOverrides = "local-overrides"
 	KeyImageRef       = "image-ref"
+	KeyBuildID        = "build-id"
 )
 
 const (
@@ -92,6 +93,7 @@ type args struct {
 	LocalOverrides []string
 	CacheImports   []frontend.CacheOptionsEntry
 	ImageRef       string
+	BuildID        string
 }
 
 // TODO this is pretty dumb, it should be removed once there's an official merge-op (which
@@ -100,6 +102,7 @@ type args struct {
 type RunType string
 
 const (
+	PreBuild    RunType = "prebuild"
 	Exec        RunType = "exec"
 	LocalExport RunType = "local-export"
 	ImageExport RunType = "image-export"
@@ -114,6 +117,7 @@ func getargs(opts map[string]string) (*args, error) {
 		Subdir:   opts[KeySubdir],
 		RunType:  RunType(opts[KeyRunType]),
 		ImageRef: opts[KeyImageRef],
+		BuildID:  opts[KeyBuildID],
 	}
 	if sourcer, ok := definitionSourcers[opts[KeySourcerName]]; !ok {
 		return nil, fmt.Errorf("unknown definition sourcer %q", opts[KeySourcerName])
@@ -143,6 +147,10 @@ func getargs(opts map[string]string) (*args, error) {
 		a.RunType = Exec
 	}
 
+	if (a.RunType == Exec || a.RunType == PreBuild) && a.BuildID == "" {
+		return nil, fmt.Errorf("missing build id")
+	}
+
 	if cacheImportReg := opts["cache-from"]; cacheImportReg != "" {
 		a.CacheImports = append(a.CacheImports, frontend.CacheOptionsEntry{
 			Type: "registry",
@@ -166,13 +174,16 @@ type BincastleFrontend struct {
 
 	startOnce  sync.Once
 	newSolveCh chan *solveReq
+	builds     map[string]*solveReq
 }
 
 type solveReq struct {
 	args     *args
 	layers   []graph.MarshalLayer
-	mounts   []executor.Mount
-	resultCh chan<- *solveResult
+	mounts   []*executor.Mount
+	resultCh chan *solveResult
+	ctx      context.Context
+	id       string
 
 	cleanupOnce sync.Once
 	cleanupFunc func()
@@ -202,89 +213,58 @@ func newBincastleFrontend(
 		applier:       applier,
 		imageExporter: imageExporter,
 		leaseManager:  leaseManager,
+		builds:        make(map[string]*solveReq),
 	}
 }
 
 func (f *BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBridge, opt map[string]string, inputs map[string]*pb.Definition, sid string) (*frontend.Result, error) {
-	// For now, the first call to Solve is expected to be the one from
-	// an "outside" client, subsequent are from inside execs. TODO this
-	// won't apply when multiple "outside" clients are supported in future.
 	f.startOnce.Do(func() {
 		f.newSolveCh = make(chan *solveReq, 1)
 		go func() {
-			var origReq *solveReq
-			var curExecReq *solveReq
-			var prevExecReq *solveReq
+			var execReqs []*solveReq
+			// For now, the first call to Exec is expected to be the one from
+			// an "outside" client, subsequent are from inside execs. TODO this
+			// won't apply when multiple "outside" clients are supported in future.
+			var origCtx context.Context
 			for req := range f.newSolveCh {
-				if origReq == nil {
-					origReq = req
+				if origCtx == nil {
+					origCtx = req.ctx
 				}
-
-				if prevExecReq != nil {
-					prevExecReq.cleanup()
-				}
-				prevExecReq = curExecReq
-
-				solveCtx, solveCancel := context.WithCancel(ctx)
+				solveCtx, solveCancel := context.WithCancel(origCtx)
 				done := make(chan *solveResult)
-				switch req.args.RunType {
-				case LocalExport:
-					curExecReq = nil
-					go func() {
-						defer close(done)
-						res, err := f.topLayerSolve(solveCtx, llbBridge, req.args, sid, req.layers)
-						done <- &solveResult{Result: res, err: err}
-					}()
-				case CacheExport:
-					curExecReq = nil
-					go func() {
-						defer close(done)
-						res, err := f.allLayerSolve(solveCtx, llbBridge, req.args, sid, req.layers)
-						done <- &solveResult{Result: res, err: err}
-					}()
-				case ImageExport:
-					curExecReq = req
-					go func() {
-						defer close(done)
-						err := f.imageExport(solveCtx, llbBridge, req.args, sid, req.mounts)
-						done <- &solveResult{Result: &frontend.Result{}, err: err}
-					}()
-				case Exec:
-					curExecReq = req
-					go func() {
-						defer close(done)
-						err := f.exec(solveCtx, llbBridge, req.args, sid, req.layers, req.mounts, nil)
-						done <- &solveResult{Result: &frontend.Result{}, err: err}
-					}()
-				}
+				started := make(chan struct{})
+
+				go func() {
+					defer close(done)
+					err := f.exec(solveCtx, llbBridge, req.args, sid, req.layers, req.mounts, started)
+					done <- &solveResult{Result: &frontend.Result{}, err: err}
+				}()
+
 				select {
 				case res := <-done:
 					solveCancel()
-					req.cleanup()
-					if prevExecReq != nil {
-						prevExecReq.resultCh = origReq.resultCh
+					req.resultCh <- res
+					if len(execReqs) > 0 {
+						lastIndex := len(execReqs) - 1
+						prevExec := execReqs[lastIndex]
+						prevExec.resultCh = execReqs[0].resultCh
 						select {
-						case f.newSolveCh <- prevExecReq:
-							prevExecReq = nil
-							curExecReq = nil
+						case f.newSolveCh <- prevExec:
+							execReqs = execReqs[:lastIndex]
 						default:
 						}
 					}
-					req.resultCh <- res
 				case newReq := <-f.newSolveCh:
 					solveCancel()
-					res := <-done // TODO timeout
-					if curExecReq == nil {
-						req.cleanup()
-					}
-					if !(req.args.RunType == Exec && req.resultCh == origReq.resultCh) {
+					res := <-done
+					execReqs = append(execReqs, req)
+					if len(execReqs) > 1 {
 						req.resultCh <- res
 					}
 					select {
 					case f.newSolveCh <- newReq:
 					default:
 						// another request came along in the meantime; go with that instead
-						newReq.cleanup()
 						newReq.resultCh <- &solveResult{err: context.Canceled} // TODO use custom error
 					}
 				}
@@ -297,20 +277,52 @@ func (f *BincastleFrontend) Solve(ctx context.Context, llbBridge frontend.Fronte
 		return nil, fmt.Errorf("failed to parse frontend args: %w", err)
 	}
 
-	layers, mounts, cleanup, err := f.getLayers(ctx, llbBridge, a, sid)
-	if err != nil {
-		return nil, err
+	var req *solveReq
+	if a.RunType != Exec {
+		layers, mounts, cleanup, err := f.getLayers(ctx, llbBridge, a, sid)
+		if err != nil {
+			return nil, err
+		}
+		req = &solveReq{
+			args:        a,
+			layers:      layers,
+			mounts:      mounts,
+			cleanupFunc: cleanup,
+			resultCh:    make(chan *solveResult, 1),
+			id:          a.BuildID,
+		}
+	} else if req = f.builds[a.BuildID]; req == nil {
+		return nil, fmt.Errorf("unknown build id %s", a.BuildID)
+	}
+	req.ctx = ctx
+
+	if a.RunType == PreBuild {
+		f.builds[req.id] = req
+	} else {
+		defer req.cleanup()
+		defer delete(f.builds, req.id)
 	}
 
-	resultCh := make(chan *solveResult, 1)
-	f.newSolveCh <- &solveReq{args: a, layers: layers, mounts: mounts, cleanupFunc: cleanup, resultCh: resultCh}
-	result := <-resultCh
-	return result.Result, result.err
+	switch a.RunType {
+	case LocalExport:
+		return f.topLayerSolve(req.ctx, llbBridge, a, sid, req.layers)
+	case CacheExport, PreBuild:
+		return f.allLayerSolve(req.ctx, llbBridge, a, sid, req.layers)
+	case ImageExport:
+		err := f.imageExport(req.ctx, llbBridge, a, sid, req.mounts)
+		return &frontend.Result{}, err
+	case Exec:
+		f.newSolveCh <- req
+		result := <-req.resultCh
+		return result.Result, result.err
+	default:
+		return nil, fmt.Errorf("unknown run type %v", a.RunType)
+	}
 }
 
 func (f *BincastleFrontend) getLayers(
 	ctx context.Context, llbBridge frontend.FrontendLLBBridge, a *args, sid string,
-) ([]graph.MarshalLayer, []executor.Mount, func(), error) {
+) ([]graph.MarshalLayer, []*executor.Mount, func(), error) {
 	var llbsrc AsSpec
 	if a.GitURL != "" {
 		llbsrc = src.ViaGit{
@@ -336,7 +348,7 @@ func (f *BincastleFrontend) getLayers(
 	}
 	var sourceDef pb.Definition
 	if err := (&sourceDef).Unmarshal(marshalLayers[len(marshalLayers)-1].LLB); err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get definition source: %w")
+		return nil, nil, nil, fmt.Errorf("failed to get definition source: %w", err)
 	}
 
 	res, err := llbBridge.Solve(ctx, frontend.SolveRequest{
@@ -426,12 +438,12 @@ func (f *BincastleFrontend) getLayers(
 	}
 	outRead.Close()
 
-	if a.RunType != Exec && a.RunType != ImageExport {
+	if a.RunType != PreBuild && a.RunType != ImageExport {
 		return layers, nil, nil, nil
 	}
 
 	eg, egctx := errgroup.WithContext(ctx)
-	mounts := make([]executor.Mount, len(layers))
+	mounts := make([]*executor.Mount, len(layers))
 	results := make([]*frontend.Result, len(layers))
 	for _i, _layer := range layers {
 		// have to copy loop vars to avoid races
@@ -453,7 +465,9 @@ func (f *BincastleFrontend) getLayers(
 			results[i] = result
 
 			if result.Ref == nil {
-				return fmt.Errorf("missing ref for result of op") // TODO useless error msg
+				// the state must have been Scratch, so it was just used
+				// for runopts + deps, no mount to create.
+				return nil
 			}
 			r, err := result.Ref.Result(ctx)
 			if err != nil {
@@ -464,7 +478,7 @@ func (f *BincastleFrontend) getLayers(
 				return fmt.Errorf("invalid ref type: %T", r.Sys())
 			}
 
-			mounts[i] = executor.Mount{
+			mounts[i] = &executor.Mount{
 				Src:      workerRef.ImmutableRef,
 				Selector: layer.OutputDir,
 				Dest: util.LowerDir{
@@ -552,7 +566,7 @@ func (f *BincastleFrontend) allLayerSolve(
 
 func (f *BincastleFrontend) imageExport(
 	ctx context.Context, llbBridge frontend.FrontendLLBBridge, a *args, sid string,
-	refMounts []executor.Mount,
+	refMounts []*executor.Mount,
 ) error {
 	ctx, done, err := leaseutil.WithLease(ctx, f.leaseManager, leaseutil.MakeTemporary)
 	if err != nil {
@@ -576,6 +590,9 @@ func (f *BincastleFrontend) imageExport(
 	defer cleanup()
 
 	for _, refMount := range refMounts {
+		if refMount == nil {
+			continue
+		}
 		ref := refMount.Src.(cache.ImmutableRef)
 		if err := ref.Finalize(ctx, true); err != nil {
 			return err
@@ -620,7 +637,7 @@ func (f *BincastleFrontend) imageExport(
 
 func (f *BincastleFrontend) exec(
 	ctx context.Context, llbBridge frontend.FrontendLLBBridge, a *args, sid string,
-	layers []graph.MarshalLayer, mounts []executor.Mount, started chan<- struct{},
+	layers []graph.MarshalLayer, mounts []*executor.Mount, started chan<- struct{},
 ) error {
 	// TODO this is very silly, just find the first layer with runtime args and assume that's
 	// the one you are supposed to run
@@ -701,7 +718,15 @@ func (f *BincastleFrontend) exec(
 		Meta:   meta,
 	}
 
-	if err := llbBridge.Run(ctx, ExecNameToID(execName), execRef, mounts, execProcess, started); err != nil {
+	var finalMounts []executor.Mount
+	for _, m := range mounts {
+		if m == nil {
+			continue
+		}
+		finalMounts = append(finalMounts, *m)
+	}
+
+	if err := llbBridge.Run(ctx, ExecNameToID(execName), execRef, finalMounts, execProcess, started); err != nil {
 		// TODO include output from process for debugging?
 		return fmt.Errorf("failed to run bincastle exec %s: %w", execName, err)
 	}

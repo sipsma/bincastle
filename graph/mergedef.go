@@ -3,8 +3,10 @@ package graph
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/moby/buildkit/client/llb"
+	"github.com/opencontainers/go-digest"
 )
 
 // TODO this is all a bit hacky and O(n^2); it's a placeholder until
@@ -17,17 +19,25 @@ type MarshalLayer struct {
 	Env        []string `json:"Env"`
 	Args       []string `json:"Args"`
 	WorkingDir string   `json:"WorkingDir"`
+
+	layerDigest digest.Digest `json:"-"`
 }
 
 func (g *Graph) MarshalLayers(ctx context.Context, co ...llb.ConstraintsOpt) ([]MarshalLayer, error) {
+	if g == nil {
+		return nil, fmt.Errorf("invalid nil graph for marshal layers")
+	}
 	var marshalLayers []MarshalLayer
+
+	// TODO
+	co = append(co, llb.LocalUniqueID("bincastle"))
 
 	roots := make(map[*Layer]struct{})
 	for _, root := range g.roots {
 		roots[root] = struct{}{}
 	}
 
-	for _, layer := range tsort(g) {
+	for _, layer := range g.tsort() {
 		def, err := layer.state.Marshal(ctx, co...)
 		if err != nil {
 			return nil, err
@@ -38,9 +48,10 @@ func (g *Graph) MarshalLayers(ctx context.Context, co ...llb.ConstraintsOpt) ([]
 		}
 
 		marshalLayer := MarshalLayer{
-			LLB:       bytes,
-			MountDir:  layer.mountDir,
-			OutputDir: layer.outputDir,
+			LLB:         bytes,
+			MountDir:    layer.mountDir,
+			OutputDir:   layer.outputDir,
+			layerDigest: layer.digest,
 		}
 		// TODO a lil silly...
 		if len(layer.args) > 0 {

@@ -389,6 +389,13 @@ func (d ContainerState) Start(def ContainerDef) (Container, error) {
 					{Type: oci.IPCNamespace},
 					// TODO {Type: configs.NEWCGROUP},
 				},
+				// TODO haven't investigated why, but without masking this
+				// path, runc can fail at container destroy with EPERM when
+				// trying to unlink something under the cgroup mount. Even
+				// setting RootlessCgroupfs in the factory initializer doesn't
+				// help. I've only seen this on Fedora 32, recent Ubuntu versions
+				// don't seem to have the issue.
+				MaskedPaths: []string{"/sys/fs/cgroup"},
 			},
 		},
 		CgroupName:       "",

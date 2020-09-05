@@ -113,9 +113,9 @@ func LocalOverrides(overrides map[string]string) SpecOpt {
 	})
 }
 
-type envOverrides int
+type EnvOverrides struct{}
 
-func (envOverrides) ApplyToSpec(s AsSpec) AsSpec {
+func (EnvOverrides) ApplyToSpec(s AsSpec) AsSpec {
 	overrides := make(map[string]string)
 	for _, kv := range os.Environ() {
 		split := strings.SplitN(kv, "=", 2)
@@ -130,8 +130,6 @@ func (envOverrides) ApplyToSpec(s AsSpec) AsSpec {
 	}
 	return LocalOverrides(overrides).ApplyToSpec(s)
 }
-
-const EnvOverrides = envOverrides(0)
 
 type LayerSpecOpt interface {
 	ApplyToLayerSpecOpts(LayerSpecOpts) LayerSpecOpts
@@ -288,6 +286,11 @@ func RunArgs(args ...string) LayerSpecOpt {
 }
 
 func BuildScript(lines ...string) LayerSpecOpt {
+	// TODO setting MAKEFLAGS here is a pure, 100% chef's kiss hack.
+	// TODO the actual way to do this will be to have more flexible
+	// opts that can prepend script lines. Not that hard, just hasn't
+	// been done yet.
+	lines = append([]string{"export MAKEFLAGS=\"-j$(nproc --all)\""}, lines...)
 	return BuildArgs(scriptArgs(lines...)...)
 }
 
@@ -295,11 +298,18 @@ func RunScript(lines ...string) LayerSpecOpt {
 	return RunArgs(scriptArgs(lines...)...)
 }
 
+func RunWorkingDir(dir string) LayerSpecOpt {
+	return LayerSpecOptFunc(func(ls LayerSpecOpts) LayerSpecOpts {
+		ls.RunWorkingDir = dir
+		return ls
+	})
+}
+
 func scriptArgs(lines ...string) []string {
 	return []string{"sh", "-e", "-c", fmt.Sprintf(
-		// TODO using THEREALEOF allows callers to use <<EOF in their
-		// own shell lines, but is obviously extremely silly. What's better?
-		"exec sh <<\"THEREALEOF\"\n%s\nTHEREALEOF",
+		// TODO this prevents you from doing <<EOF in the script itself,
+		// but is that ever needed?
+		"exec sh <<\"EOF\"\n%s\nEOF",
 		strings.Join(append([]string{`set -e`}, lines...), "\n"),
 	)}
 }
@@ -320,8 +330,8 @@ func simpleTransform(f func(Layer) Layer) GraphOpt {
 		// old layer digest -> *Graph replacing it
 		oldToNew := make(map[digest.Digest]*Graph)
 		g.bottomUpWalk(func(l *Layer) {
+			l = l.clone()
 			newLayer := *l
-			newLayer.Graph.roots = []*Layer{&newLayer}
 
 			var newDepGraphs []*Graph
 			if l.deps != nil {
@@ -331,6 +341,7 @@ func simpleTransform(f func(Layer) Layer) GraphOpt {
 			}
 			newLayer.deps = mergeGraphs(newDepGraphs...)
 			newLayer = f(newLayer)
+			newLayer.roots = []*Layer{&newLayer}
 			newLayer.digest = newLayer.calcDigest()
 			oldToNew[l.digest] = &newLayer.Graph
 		})

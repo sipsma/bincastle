@@ -85,7 +85,7 @@ const (
 var (
 	insecure   = true
 	resolverFn = resolver.NewRegistryConfig(map[string]config.RegistryConfig{
-		"docker.io": config.RegistryConfig{
+		"docker.io": {
 			Insecure: &insecure, // TODO getting unknown CA errors without this, need better fix
 		},
 	})
@@ -108,6 +108,7 @@ type BincastleArgs struct {
 	SSHAgentSockPath string
 
 	BincastleSockPath string
+	Verbose           bool
 }
 
 func BincastleBuild(ctx context.Context, args BincastleArgs) error {
@@ -188,17 +189,23 @@ func BincastleBuild(ctx context.Context, args BincastleArgs) error {
 
 	var frontend string
 	frontendAttrs := make(map[string]string)
+	buildID := identity.NewID()
 	if args.LLB == nil {
 		frontend = "bincastle"
+		realRunType := runType
+		if realRunType == Exec {
+			realRunType = PreBuild
+		}
 		frontendAttrs = map[string]string{
 			KeyGitURL:         args.SourceGitURL,
 			KeyGitRef:         args.SourceGitRef,
 			KeyLocalDir:       args.SourceLocalDir,
 			KeySubdir:         args.SourceSubdir,
 			KeySourcerName:    args.SourcerName,
-			KeyRunType:        string(runType),
+			KeyRunType:        string(realRunType),
 			KeyLocalOverrides: strings.Join(args.LocalOverrides, ":"),
 			KeyImageRef:       args.ExportImageRef,
+			KeyBuildID:        buildID,
 		}
 	}
 
@@ -213,22 +220,46 @@ func BincastleBuild(ctx context.Context, args BincastleArgs) error {
 	}
 
 	displayCh := make(chan *client.SolveStatus)
-	eg, ctx := errgroup.WithContext(ctx)
+	eg, egctx := errgroup.WithContext(ctx)
+	displayCtx, displayCancel := context.WithCancel(context.Background())
 
 	eg.Go(func() error {
-		_, err := c.Solve(ctx, args.LLB, solveOpt, displayCh)
+		defer displayCancel()
+		_, err := c.Solve(egctx, args.LLB, solveOpt, displayCh)
 		return err
 	})
 
 	eg.Go(func() error {
-		/* TODO figure out how to make tty output look nice
-		cons, err := console.ConsoleFromFile(os.Stdin)
-		if err != nil {
-			return err
+		var cons console.Console
+		if !args.Verbose {
+			var err error
+			cons, err = console.ConsoleFromFile(os.Stdin)
+			if err != nil {
+				return err
+			}
 		}
-		return progressui.DisplaySolveStatus(context.Background(), "", cons, os.Stderr, displayCh)
-		*/
-		return progressui.DisplaySolveStatus(context.Background(), "", nil, os.Stderr, displayCh)
+		return progressui.DisplaySolveStatus(displayCtx, "", cons, os.Stderr, displayCh)
+	})
+
+	if err := eg.Wait(); err != nil && err != context.Canceled {
+		return err
+	}
+
+	if runType != Exec {
+		return nil
+	}
+	solveOpt.FrontendAttrs[KeyRunType] = string(runType)
+
+	displayCh = make(chan *client.SolveStatus)
+	eg, egctx = errgroup.WithContext(ctx)
+
+	eg.Go(func() error {
+		_, err := c.Solve(egctx, args.LLB, solveOpt, displayCh)
+		return err
+	})
+
+	eg.Go(func() error {
+		return progressui.DisplaySolveStatus(egctx, "", nil, os.Stderr, displayCh)
 	})
 
 	return eg.Wait()
@@ -752,7 +783,7 @@ func (e *runcExecutor) Run(
 			Readonly: true,
 		},
 		ctr.BindMount{
-			Dest:     "/self",
+			Dest:     "/bincastle",
 			Source:   selfBin,
 			Readonly: true,
 		},

@@ -5,9 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/solver/llbsolver"
@@ -85,31 +85,42 @@ func (ls *LayerSpecOpts) Build(depGraphs []*Graph) *Graph {
 		outputDir: ls.OutputDir,
 	}
 
-	if len(ls.BuildExecOpts) > 0 {
+	var ei llb.ExecInfo
+	for _, buildExecOpt := range ls.BuildExecOpts {
+		buildExecOpt.SetRunOption(&ei)
+	}
+	args, err := ei.State.GetArgs(context.TODO())
+	if err != nil {
+		panic(err)
+	}
+
+	if len(args) > 0 {
 		execOpts := ls.BuildExecOpts
 		mergedGraph := mergeGraphs(buildDeps...)
 		for _, kv := range mergedGraph.mergedEnv() {
 			execOpts = append(execOpts, llb.AddEnv(kv.key, kv.val))
 		}
 
-		for i, dep := range tsort(mergedGraph) {
+		for i, dep := range mergedGraph.tsort() {
 			execOpts = append(execOpts, llb.AddMount(util.LowerDir{
 				Index: i,
 				Dest:  dep.mountDir,
 			}.String(), dep.state, llb.Readonly, llb.SourcePath(dep.outputDir)))
 		}
+
+		name := NameOf(ls)
+		if name == "" {
+			// The default name used often has \n in it (due to using <<EOF),
+			// which causes the tty-based output to get messed up.
+			// TODO can this be fixed upstream?
+			name = strings.ReplaceAll(strings.Join(args, " "), "\n", "\\n")
+		}
+		execOpts = append(execOpts, llb.WithCustomName(name))
+
 		layer.state = layer.state.Run(execOpts...).Root()
 	}
 
 	layer.deps = mergeGraphs(runDeps...)
-
-	if layer.deps != nil {
-		for _, dep := range layer.deps.roots {
-			if dep.index+1 > layer.index {
-				layer.index = dep.index + 1
-			}
-		}
-	}
 
 	layer.args = ls.RunArgs
 	layer.env = ls.RunEnv
@@ -223,15 +234,6 @@ func (r *replace) Build(depGraphs []*Graph) *Graph {
 		}
 
 		newLayer.deps = mergeGraphs(newDepGraphs...)
-		newLayer.index = 0
-		if newLayer.deps != nil {
-			for _, dep := range newLayer.deps.roots {
-				if dep.index+1 > newLayer.index {
-					newLayer.index = dep.index + 1
-				}
-			}
-		}
-
 		newLayer.digest = newLayer.calcDigest()
 		oldToNew[l.digest] = &newLayer.Graph
 	})
@@ -261,9 +263,14 @@ type override struct {
 	overridee AsSpec
 	overrider AsSpec
 	cache     map[AsSpec]Spec
+	newDeps   []AsSpec
 }
 
 func (o *override) Deps() []AsSpec {
+	if o.newDeps != nil {
+		return o.newDeps
+	}
+
 	oldToNew := make(map[AsSpec]AsSpec)
 	if o.cache == nil {
 		o.cache = make(map[AsSpec]Spec)
@@ -308,10 +315,11 @@ func (o *override) Deps() []AsSpec {
 			spec = newSpec.Spec()
 			o.cache[newSpec] = spec
 		}
-
-		return spec.Deps()
+		o.newDeps = o.cache[newSpec].Deps()
+	} else {
+		o.newDeps = o.cache[o.spec].Deps()
 	}
-	return o.cache[o.spec].Deps()
+	return o.newDeps
 }
 
 func (o *override) Build(depGraphs []*Graph) *Graph {
@@ -320,6 +328,28 @@ func (o *override) Build(depGraphs []*Graph) *Graph {
 
 func (o *override) Metadata(key interface{}) interface{} {
 	return o.spec.Spec().Metadata(key)
+}
+
+// TODO docs, creates a transitively reduced graph of layers from the specs,
+// transitive reduction gives consistent, easy-to-understand and minimized
+// result that I think matches most closely what you usually mean when you
+// specify the existence of a dep.
+func Build(asSpec AsSpec) *Graph {
+	cache := make(map[AsSpec]Spec)
+	graphs := make(map[AsSpec]*Graph)
+	bottomUpWalkSpecs(asSpec, cache, func(asSpec AsSpec) {
+		var depGraphs []*Graph
+		spec, ok := cache[asSpec]
+		if !ok {
+			spec = asSpec.Spec()
+			cache[asSpec] = spec
+		}
+		for _, dep := range spec.Deps() {
+			depGraphs = append(depGraphs, graphs[dep])
+		}
+		graphs[asSpec] = spec.Build(depGraphs)
+	})
+	return graphs[asSpec]
 }
 
 func walkSpecs(asSpec AsSpec, cache map[AsSpec]Spec, f func(AsSpec) error) error {
@@ -345,7 +375,7 @@ func walkSpecs(asSpec AsSpec, cache map[AsSpec]Spec, f func(AsSpec) error) error
 		},
 		func(vtx interface{}) error {
 			if vtx == nil {
-				return f(nil)
+				return nil
 			}
 			return f(vtx.(AsSpec))
 		},
@@ -373,105 +403,20 @@ func bottomUpWalkSpecs(asSpec AsSpec, cache map[AsSpec]Spec, f func(AsSpec)) {
 			}
 			return deps
 		},
-		func(vtx interface{}) {
-			if vtx == nil {
-				f(nil)
-				return
+		func(vtxs []interface{}) {
+			for _, vtx := range vtxs {
+				if vtx == nil {
+					return
+				}
+				f(vtx.(AsSpec))
 			}
-			f(vtx.(AsSpec))
 		},
 	)
-}
-
-// TODO docs, creates a transitively reduced graph of layers from the specs,
-// transitive reduction gives consistent, easy-to-understand and minimized
-// result that I think matches most closely what you usually mean when you
-// specify the existence of a dep.
-func Build(asSpec AsSpec, opts ...SpecOpt) *Graph {
-	for _, opt := range opts {
-		asSpec = opt.ApplyToSpec(asSpec)
-	}
-	spec := asSpec.Spec()
-
-	type vtx struct {
-		Spec
-		deps           []*vtx
-		pendingDeps    map[*vtx]struct{}
-		pendingParents map[*vtx]struct{}
-	}
-	newVtx := func(spec Spec) *vtx {
-		return &vtx{
-			Spec:           spec,
-			pendingDeps:    make(map[*vtx]struct{}),
-			pendingParents: make(map[*vtx]struct{}),
-		}
-	}
-
-	v := newVtx(spec)
-	vtxs := map[AsSpec]*vtx{asSpec: v}
-	allDepsReady := make(map[*vtx]struct{})
-	unprocessed := map[*vtx]struct{}{v: struct{}{}}
-	for len(unprocessed) > 0 {
-		newUnprocessed := make(map[*vtx]struct{})
-		for v := range unprocessed {
-			for _, dep := range v.Deps() {
-				if dep == nil {
-					v.deps = append(v.deps, nil)
-					continue
-				}
-				depVtx := vtxs[dep]
-				if depVtx == nil {
-					depVtx = newVtx(dep.Spec())
-					vtxs[dep] = depVtx
-					newUnprocessed[depVtx] = struct{}{}
-				}
-				v.deps = append(v.deps, depVtx)
-				v.pendingDeps[depVtx] = struct{}{}
-				depVtx.pendingParents[v] = struct{}{}
-			}
-			if len(v.pendingDeps) == 0 {
-				allDepsReady[v] = struct{}{}
-			}
-		}
-		unprocessed = newUnprocessed
-	}
-
-	// stillPending is used to detect loops in the graph; if it's non-nil after
-	// the forloop exits below there was an unsatisfiable dependency due to a
-	// loop.
-	var stillPending *vtx
-
-	graphs := make(map[*vtx]*Graph)
-	for len(allDepsReady) > 0 {
-		stillPending = nil
-		newAllDepsReady := make(map[*vtx]struct{})
-		for v := range allDepsReady {
-			var depGraphs []*Graph
-			for _, dep := range v.deps {
-				depGraphs = append(depGraphs, graphs[dep])
-			}
-			graphs[v] = v.Build(depGraphs)
-			for parent := range v.pendingParents {
-				stillPending = parent
-				delete(parent.pendingDeps, v)
-				if len(parent.pendingDeps) == 0 {
-					newAllDepsReady[parent] = struct{}{}
-				}
-			}
-		}
-		allDepsReady = newAllDepsReady
-	}
-	if stillPending != nil {
-		// TODO make SpecGraph actually stringify usefully and also print the whole loop
-		panic(fmt.Sprintf("graph has loop at %+v", stillPending))
-	}
-	return graphs[v]
 }
 
 type Layer struct {
 	Graph
 	deps  *Graph
-	index int // max number of hops to a layer with no deps (or 0 if this has no deps)
 
 	state     llb.State
 	mountDir  string
@@ -488,6 +433,25 @@ type Layer struct {
 	// which allows you to stably identify it across
 	// transformations.
 	origDigest digest.Digest
+}
+
+func (l Layer) clone() *Layer {
+	l.args = append([]string{}, l.args...)
+
+	origEnv := l.env
+	l.env = make(map[string]string)
+	for k, v := range origEnv {
+		l.env[k] = v
+	}
+
+	origMeta := l.metadata
+	l.metadata = make(map[interface{}]interface{})
+	for k, v := range origMeta {
+		l.metadata[k] = v
+	}
+
+	l.roots = []*Layer{&l}
+	return &l
 }
 
 func (l Layer) Metadata(key interface{}) interface{} {
@@ -531,7 +495,7 @@ func (kv kvpair) String() string {
 func (g *Graph) mergedEnv() []kvpair {
 	merged := make(map[string]int)
 	var kvs []kvpair
-	for _, l := range tsort(g) {
+	for _, l := range g.tsort() {
 		// TODO special handling for PATH?
 		for k, v := range l.env {
 			if index, ok := merged[k]; ok {
@@ -581,7 +545,7 @@ func (g *Graph) calcDigest() digest.Digest {
 			m.DepDigest = string(l.deps.digest)
 		}
 
-		def, err := l.state.Marshal(context.TODO())
+		def, err := l.state.Marshal(context.TODO(), llb.LocalUniqueID("bincastle"))
 		if err != nil {
 			panic(err)
 		}
@@ -663,10 +627,46 @@ func (g *Graph) bottomUpWalk(f func(*Layer)) {
 			}
 			return deps
 		},
-		func(vtx interface{}) {
-			f(vtx.(*Layer))
+		func(vtxs []interface{}) {
+			for _, vtx := range vtxs {
+				f(vtx.(*Layer))
+			}
 		},
 	)
+}
+
+func (g *Graph) tsort() []*Layer {
+	starts := make([]interface{}, len(g.roots))
+	for i, root := range g.roots {
+		starts[i] = root
+	}
+
+	var sorted []*Layer
+	bottomUpWalk(starts,
+		func(vtx interface{}) interface{} {
+			return vtx.(*Layer).digest
+		},
+		func(vtx interface{}) []interface{} {
+			var deps []interface{}
+			if layerDeps := vtx.(*Layer).deps; layerDeps != nil {
+				for _, dep := range layerDeps.roots {
+					deps = append(deps, dep)
+				}
+			}
+			return deps
+		},
+		func(vtxs []interface{}) {
+			var layers []*Layer
+			for _, vtx := range vtxs {
+				layers = append(layers, vtx.(*Layer))
+			}
+			sort.Slice(layers, func(i, j int) bool {
+				return layers[i].digest < layers[j].digest
+			})
+			sorted = append(sorted, layers...)
+		},
+	)
+	return sorted
 }
 
 func mergeGraphs(graphs ...*Graph) *Graph {
@@ -723,25 +723,6 @@ func mergeGraphs(graphs ...*Graph) *Graph {
 	return finalGraph
 }
 
-func tsort(graph *Graph) []*Layer {
-	if graph == nil {
-		return nil
-	}
-	var layers []*Layer
-	graph.walk(func(l *Layer) error {
-		layers = append(layers, l)
-		return nil
-	})
-	sort.Slice(layers, func(i, j int) bool {
-		il, jl := layers[i], layers[j]
-		if il.index != jl.index {
-			return il.index < jl.index
-		}
-		return il.digest < jl.digest
-	})
-	return layers
-}
-
 var StopWalk = errors.New("stopping walk")
 var SkipDeps = errors.New("skipping deps during walk")
 
@@ -783,13 +764,14 @@ func walk(
 	return nil
 }
 
-// walks in reverse topological order, when a layer is visited all its deps
-// will have already been visited
+// bottomUpWalk walks in reverse topological order, when a vtx is visited all
+// its deps will have already been visited. Each visit is to a slice of vtxs in
+// the same topological level.
 func bottomUpWalk(
 	starts []interface{},
 	getid func(interface{}) interface{},
 	getdeps func(interface{}) []interface{},
-	visit func(interface{}),
+	visit func([]interface{}),
 ) {
 	type walkState struct {
 		vtx            interface{}
@@ -800,6 +782,9 @@ func bottomUpWalk(
 	allDepsReady := make(map[*walkState]struct{})
 
 	walk(starts, getid, getdeps, func(vtx interface{}) error {
+		if vtx == nil {
+			return nil
+		}
 		id := getid(vtx)
 		ws, ok := walkStates[id]
 		if !ok {
@@ -813,6 +798,9 @@ func bottomUpWalk(
 		deps := getdeps(vtx)
 		if len(deps) > 0 {
 			for _, dep := range deps {
+				if dep == nil {
+					continue
+				}
 				depid := getid(dep)
 				depState, ok := walkStates[depid]
 				if !ok {
@@ -837,8 +825,9 @@ func bottomUpWalk(
 	for len(allDepsReady) > 0 {
 		newAllDepsReady := make(map[*walkState]struct{})
 		stillPendings = make(map[*walkState]struct{})
+		var current []interface{}
 		for ws := range allDepsReady {
-			visit(ws.vtx)
+			current = append(current, ws.vtx)
 			for parent := range ws.pendingParents {
 				stillPendings[parent] = struct{}{}
 				delete(parent.pendingDeps, ws)
@@ -847,6 +836,7 @@ func bottomUpWalk(
 				}
 			}
 		}
+		visit(current)
 		allDepsReady = newAllDepsReady
 	}
 
